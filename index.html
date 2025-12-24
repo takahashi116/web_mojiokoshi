@@ -1,157 +1,138 @@
-<!-- index.html（フォルダ固定UIを削除 + ダーク寄りの見出し/文言整理） -->
-<!doctype html>
+<!-- index.html（仕切り直し：元アプリのデザインに寄せつつ、話者数/モデル/Drive選択を追加。フォルダ固定は無し） -->
+<!DOCTYPE html>
 <html lang="ja">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
-  <meta name="theme-color" content="#0b1220" />
-  <title>文字起こし（話者分離） - Gemini</title>
+  <meta charset="UTF-8">
+  <meta name="viewport"
+        content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <meta name="description" content="Gemini APIを使用した音声文字起こしアプリ">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Transcriber">
+  <meta name="theme-color" content="#0a0a0f">
 
-  <link rel="stylesheet" href="./styles.css?v=20251224b" />
+  <title>音声文字起こし | Gemini Transcriber</title>
 
+  <link rel="stylesheet" href="styles.css?v=20251224c">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+
+  <!-- Drive Picker (フォルダ固定は実装しない。選びにくさは将来改善) -->
   <script src="https://accounts.google.com/gsi/client" async defer></script>
   <script src="https://apis.google.com/js/api.js" async defer></script>
 </head>
 
 <body>
-  <div class="app">
-    <header class="topbar">
-      <div class="brand">
-        <div class="brand-mark">G</div>
-        <div class="brand-text">
-          <div class="brand-title">文字起こし（話者分離）</div>
-          <div class="brand-sub">Gemini + Google Drive</div>
-        </div>
+  <div class="app-container">
+    <!-- Header -->
+    <header class="header">
+      <div class="logo">
+        <span class="logo-icon">📝</span>
+        <h1>Gemini Transcriber</h1>
       </div>
-      <div class="topbar-actions">
-        <a class="link" href="https://ai.google.dev/gemini-api/docs/files" target="_blank" rel="noreferrer">Files API</a>
-        <a class="link" href="https://developers.google.com/picker" target="_blank" rel="noreferrer">Drive Picker</a>
-      </div>
+      <p class="tagline">音声/動画ファイルをAIで文字起こし（話者分離・JSON出力）</p>
     </header>
 
-    <main class="layout">
-      <section class="card">
-        <h2>1. API キー設定</h2>
-        <p class="muted">Gemini API キーはブラウザ（localStorage）に保存されます。</p>
+    <!-- Main Content -->
+    <main class="main-content">
+      <!-- API Key Section -->
+      <section class="api-key-section glass-card">
+        <h2>🔑 APIキー設定</h2>
 
-        <div class="grid-2">
-          <div class="field">
-            <label for="apiKeyInput">Gemini API Key</label>
-            <div class="input-row">
-              <input id="apiKeyInput" type="password" inputmode="text" autocomplete="off" placeholder="AI... から始まるキー" />
-              <button id="toggleKeyBtn" class="btn btn-ghost" type="button">表示</button>
-            </div>
-            <div class="hint" id="keyStatus">未設定</div>
-          </div>
+        <div class="api-key-input-group">
+          <input type="password" id="apiKeyInput" placeholder="Gemini APIキーを入力..." class="text-input" autocomplete="off">
+          <button id="toggleApiKey" class="btn-icon" title="表示/非表示" type="button">👁️</button>
+          <button id="saveApiKey" class="btn-save" title="保存" type="button">💾 保存</button>
+        </div>
 
-          <div class="field">
-            <label for="modelSelect">モデル</label>
-            <select id="modelSelect">
+        <div class="row-2">
+          <div class="row-item">
+            <label class="mini-label" for="modelSelect">モデル</label>
+            <select id="modelSelect" class="select-input">
               <option value="gemini-3-flash-preview">gemini-3-flash-preview（推奨）</option>
-              <option value="gemini-3-pro-preview">gemini-3-pro-preview</option>
-              <option value="gemini-2.5-flash">gemini-2.5-flash</option>
-              <option value="gemini-2.5-pro">gemini-2.5-pro</option>
+              <option value="gemini-3-pro">gemini-3-pro</option>
             </select>
-            <div class="hint">出力は JSON のみになるように要求します。</div>
+          </div>
+
+          <div class="row-item">
+            <label class="mini-label" for="speakerCount">話者数（最大 20）</label>
+            <select id="speakerCount" class="select-input"></select>
           </div>
         </div>
 
-        <div class="grid-2">
-          <div class="field">
-            <label for="speakerCountSelect">話者数（最大 10）</label>
-            <select id="speakerCountSelect"></select>
-            <div class="hint">選択した人数がプロンプトに反映されます。</div>
-          </div>
+        <div class="api-key-file">
+          <label class="file-label">
+            または APIkey.txt を読み込む:
+            <input type="file" id="apiKeyFile" accept=".txt" class="file-input">
+            <span class="file-btn">ファイル選択</span>
+          </label>
+          <span id="apiKeyStatus" class="status-badge"></span>
+        </div>
+      </section>
 
-          <div class="field">
-            <label>保存</label>
-            <button id="saveKeyBtn" class="btn" type="button">このキーを保存</button>
-            <div class="hint">保存後、再読み込みしても保持されます。</div>
+      <!-- File Upload Section -->
+      <section class="upload-section glass-card">
+        <h2>🎵 音声/動画ファイル選択</h2>
+
+        <div class="drive-row">
+          <button id="driveLoginBtn" class="btn-secondary" type="button">Google Drive にログイン</button>
+          <button id="drivePickBtn" class="btn-secondary" type="button" disabled>Drive から選ぶ</button>
+          <span id="driveStatus" class="status-badge"></span>
+        </div>
+
+        <div class="dropzone" id="dropzone">
+          <div class="dropzone-content">
+            <span class="dropzone-icon">📁</span>
+            <p>ファイルをドラッグ&ドロップ</p>
+            <p class="dropzone-hint">または</p>
+            <label class="file-select-btn">
+              ファイルを選択
+              <input type="file" id="audioFileInput"
+                     accept="audio/*,video/*,.mp3,.wav,.m4a,.webm,.ogg,.mp4,.flac,.mov" multiple class="file-input">
+            </label>
+          </div>
+        </div>
+
+        <div id="fileList" class="file-list"></div>
+
+        <div class="hint-block">
+          <div class="hint-title">注意</div>
+          <div class="hint-text">
+            「Failed to fetch」はCORS/ネットワークブロック等でも出ます。まずは本仕切り直し版で「resumableアップロード」を避け、安定化を優先します。
           </div>
         </div>
       </section>
 
-      <section class="card">
-        <h2>2. 音声/動画ファイルを選択</h2>
-
-        <div class="tabs">
-          <button id="tabDrive" class="tab is-active" type="button">Google Drive（推奨）</button>
-          <button id="tabLocal" class="tab" type="button">端末ファイル</button>
-        </div>
-
-        <div id="drivePanel" class="panel">
-          <div class="grid-2">
-            <div class="field">
-              <label>Google Drive 接続</label>
-              <button id="driveConnectBtn" class="btn" type="button">Google にログイン</button>
-              <div class="hint" id="driveStatus">未接続</div>
-            </div>
-
-            <div class="field">
-              <label>ファイル選択（音声/動画）</label>
-              <button id="pickFileBtn" class="btn" type="button" disabled>Drive からファイルを選ぶ</button>
-              <div class="hint" id="selectedFileName">未選択</div>
-            </div>
-          </div>
-
-          <p class="muted" style="margin-top:10px;">
-            共有フォルダ内のファイルも選択対象です（Picker のUI内で移動して選択してください）。
-          </p>
-        </div>
-
-        <div id="localPanel" class="panel is-hidden">
-          <div class="field">
-            <label for="localFileInput">端末から選択</label>
-            <input id="localFileInput" type="file" accept="audio/*,video/*" />
-            <div class="hint" id="localFileName">未選択</div>
-          </div>
-          <p class="muted">iPhone は安定性のため、常に Files API（アップロード）で送信します。</p>
-        </div>
+      <!-- Transcribe Button -->
+      <section class="action-section">
+        <button id="transcribeBtn" class="transcribe-button" disabled type="button">
+          <span class="btn-text">文字起こし開始</span>
+          <span class="btn-icon-right">✨</span>
+        </button>
       </section>
 
-      <section class="card">
-        <h2>3. 文字起こし</h2>
-        <div class="action-row">
-          <button id="startBtn" class="btn btn-primary" type="button" disabled>文字起こし開始</button>
-          <div class="progress">
-            <div class="progress-bar" id="progressBar" style="width:0%"></div>
-          </div>
+      <!-- Progress Section -->
+      <section id="progressSection" class="progress-section glass-card" style="display: none;">
+        <h2>⏳ 処理中</h2>
+        <div class="progress-bar">
+          <div class="progress-fill" id="progressFill"></div>
         </div>
-        <div class="hint" id="progressText">待機中</div>
-
-        <details class="details">
-          <summary>プロンプト（確認用）</summary>
-          <pre id="promptPreview" class="codebox"></pre>
-        </details>
+        <p id="progressText" class="progress-text">準備中...</p>
       </section>
 
-      <section class="card">
-        <h2>4. 結果</h2>
-
-        <div class="result-grid">
-          <div>
-            <h3>チャット表示（話者別）</h3>
-            <div id="chatThread" class="chat-thread">
-              <div class="muted">まだ結果はありません。</div>
-            </div>
-          </div>
-
-          <div>
-            <div class="result-header">
-              <h3>JSON（生データ）</h3>
-              <button id="downloadJsonBtn" class="btn btn-ghost" type="button" disabled>JSON をダウンロード</button>
-            </div>
-            <pre id="jsonOutput" class="codebox">まだ結果はありません。</pre>
-          </div>
-        </div>
+      <!-- Results Section -->
+      <section id="resultsSection" class="results-section glass-card" style="display: none;">
+        <h2>📄 文字起こし結果</h2>
+        <div id="resultsList" class="results-list"></div>
       </section>
-
-      <footer class="footer">
-        <div class="muted">組織内公開前提のクライアント実行です。APIキーの取り扱いに注意してください。</div>
-      </footer>
     </main>
+
+    <footer class="footer">
+      <p>Powered by Gemini API • クライアント実行 • APIキーは端末のlocalStorageに保存</p>
+    </footer>
   </div>
 
-  <script src="./app.js?v=20251224b" defer></script>
+  <script src="app.js?v=20251224c"></script>
 </body>
 </html>

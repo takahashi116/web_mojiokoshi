@@ -1,640 +1,783 @@
-/* app.js（フォルダ固定機能を削除 + iPhoneの巻き戻り対策としてトークンをsessionStorage復元） */
-(() => {
-  'use strict';
+/**
+ * Gemini Transcriber - 仕切り直し版
+ * - 元のダーク/Glass UIに寄せる（index/stylesの系統を踏襲） 
+ * - “フォルダ固定”は削除（安定化優先）
+ * - Files APIはブラウザで通りやすい FormData 単発POST（resumableは使わない） :contentReference[oaicite:5]{index=5}
+ * - 出力は JSON（segments: [{speaker,text}]）→ チャット表示＋JSON表示
+ * - 話者色は最大20
+ */
 
-  const GCP_OAUTH_CLIENT_ID = '478200222114-ronuhiecjrc0lp9t1b6nnqod7cji46o3.apps.googleusercontent.com';
-  const GCP_API_KEY = 'AIzaSyB6YPsmEy62ltuh1aqZX6Z5Hjx0P9mt0Lw';
-  const DRIVE_SCOPES = 'https://www.googleapis.com/auth/drive.readonly';
+/* === Drive settings (コード埋め込みOKという要望に従う) === */
+const GCP_OAUTH_CLIENT_ID = '478200222114-ronuhiecjrc0lp9t1b6nnqod7cji46o3.apps.googleusercontent.com';
+const GCP_API_KEY = 'AIzaSyB6YPsmEy62ltuh1aqZX6Z5Hjx0P9mt0Lw';
+const DRIVE_SCOPES = 'https://www.googleapis.com/auth/drive.readonly';
 
-  const GEMINI_BASE_URL = 'https://generativelanguage.googleapis.com';
-  const INLINE_MAX_BYTES = 15 * 1024 * 1024;
+class GeminiTranscriber {
+  constructor() {
+    // DOM
+    this.apiKeyInput = document.getElementById('apiKeyInput');
+    this.toggleApiKeyBtn = document.getElementById('toggleApiKey');
+    this.saveApiKeyBtn = document.getElementById('saveApiKey');
+    this.apiKeyFile = document.getElementById('apiKeyFile');
+    this.apiKeyStatus = document.getElementById('apiKeyStatus');
 
-  const LS_GEMINI_KEY = 'gemini_api_key';
-  const LS_SPEAKER_COUNT = 'speaker_count';
-  const LS_MODEL = 'gemini_model';
+    this.modelSelect = document.getElementById('modelSelect');
+    this.speakerCountSelect = document.getElementById('speakerCount');
 
-  const SS_DRIVE_TOKEN = 'drive_oauth_token';
+    this.driveLoginBtn = document.getElementById('driveLoginBtn');
+    this.drivePickBtn = document.getElementById('drivePickBtn');
+    this.driveStatus = document.getElementById('driveStatus');
 
-  function $(id) { return document.getElementById(id); }
+    this.dropzone = document.getElementById('dropzone');
+    this.audioFileInput = document.getElementById('audioFileInput');
+    this.fileList = document.getElementById('fileList');
 
-  function isIOSLike() {
-    const ua = navigator.userAgent || '';
-    const iOS = /iP(hone|od|ad)/.test(ua);
-    const iPadOS = navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1;
-    return iOS || iPadOS;
+    this.transcribeBtn = document.getElementById('transcribeBtn');
+    this.progressSection = document.getElementById('progressSection');
+    this.progressFill = document.getElementById('progressFill');
+    this.progressText = document.getElementById('progressText');
+
+    this.resultsSection = document.getElementById('resultsSection');
+    this.resultsList = document.getElementById('resultsList');
+
+    // State
+    this.files = []; // { id, name, size, mimeType, source, getBlob():Promise<Blob> }
+    this.apiKey = '';
+    this.isProcessing = false;
+
+    this.model = 'gemini-3-flash-preview'; // :contentReference[oaicite:6]{index=6}
+    this.speakerCount = 2;
+
+    // Drive
+    this.oauthToken = '';
+    this.tokenClient = null;
+    this.pickerReady = false;
+
+    this.init();
   }
 
-  function clampSpeakerCount(n) {
+  init() {
+    this.initSpeakerSelect();
+    this.bindEvents();
+    this.loadSavedSettings();
+    this.initPickerLoader();
+    this.updateTranscribeButton();
+  }
+
+  initSpeakerSelect() {
+    this.speakerCountSelect.innerHTML = '';
+    for (let i = 1; i <= 20; i++) {
+      const opt = document.createElement('option');
+      opt.value = String(i);
+      opt.textContent = String(i);
+      this.speakerCountSelect.appendChild(opt);
+    }
+  }
+
+  bindEvents() {
+    // API key
+    this.apiKeyInput.addEventListener('input', () => this.onApiKeyInput());
+    this.toggleApiKeyBtn.addEventListener('click', () => this.toggleApiKeyVisibility());
+    this.saveApiKeyBtn.addEventListener('click', () => this.saveApiKey());
+    this.apiKeyFile.addEventListener('change', (e) => this.loadApiKeyFile(e));
+
+    // model / speakers
+    this.modelSelect.addEventListener('change', () => {
+      this.model = this.modelSelect.value;
+      localStorage.setItem('gemini_model', this.model);
+    });
+    this.speakerCountSelect.addEventListener('change', () => {
+      this.speakerCount = this.clampSpeaker(parseInt(this.speakerCountSelect.value, 10));
+      localStorage.setItem('speaker_count', String(this.speakerCount));
+    });
+
+    // drive
+    this.driveLoginBtn.addEventListener('click', () => this.driveLogin());
+    this.drivePickBtn.addEventListener('click', () => this.openDrivePicker());
+
+    // file upload
+    this.dropzone.addEventListener('click', (e) => {
+      if (e.target.closest('.file-select-btn')) return;
+      this.audioFileInput.click();
+    });
+    this.dropzone.addEventListener('dragover', (e) => this.onDragOver(e));
+    this.dropzone.addEventListener('dragleave', () => this.onDragLeave());
+    this.dropzone.addEventListener('drop', (e) => this.onDrop(e));
+    this.audioFileInput.addEventListener('change', (e) => this.onFileSelect(e));
+
+    // transcribe
+    this.transcribeBtn.addEventListener('click', () => this.startTranscription());
+  }
+
+  loadSavedSettings() {
+    try {
+      const savedKey = localStorage.getItem('gemini_api_key');
+      if (savedKey) {
+        this.apiKeyInput.value = savedKey;
+        this.apiKey = savedKey;
+        this.updateApiKeyStatus(true, '✓ 設定済み');
+      }
+
+      const savedModel = localStorage.getItem('gemini_model');
+      if (savedModel) this.model = savedModel;
+
+      const savedSp = localStorage.getItem('speaker_count');
+      if (savedSp) this.speakerCount = this.clampSpeaker(parseInt(savedSp, 10));
+
+      this.modelSelect.value = this.model;
+      this.speakerCountSelect.value = String(this.speakerCount);
+    } catch (e) {
+      // localStorageが使えない環境もあるため黙って継続
+    }
+  }
+
+  onApiKeyInput() {
+    this.apiKey = this.apiKeyInput.value.trim();
+    this.updateTranscribeButton();
+  }
+
+  saveApiKey() {
+    this.apiKey = this.apiKeyInput.value.trim();
+    if (!this.apiKey) {
+      this.updateApiKeyStatus(false, 'APIキーを入力してください');
+      this.updateTranscribeButton();
+      return;
+    }
+
+    try {
+      localStorage.setItem('gemini_api_key', this.apiKey);
+      this.updateApiKeyStatus(true, '✓ 保存しました');
+      this.saveApiKeyBtn.classList.add('saved');
+      this.saveApiKeyBtn.textContent = '✓ 保存済';
+      setTimeout(() => {
+        this.saveApiKeyBtn.classList.remove('saved');
+        this.saveApiKeyBtn.textContent = '💾 保存';
+      }, 1500);
+    } catch (e) {
+      this.updateApiKeyStatus(false, '保存に失敗しました');
+    }
+
+    this.updateTranscribeButton();
+  }
+
+  toggleApiKeyVisibility() {
+    if (this.apiKeyInput.type === 'password') {
+      this.apiKeyInput.type = 'text';
+      this.toggleApiKeyBtn.textContent = '🙈';
+    } else {
+      this.apiKeyInput.type = 'password';
+      this.toggleApiKeyBtn.textContent = '👁️';
+    }
+  }
+
+  async loadApiKeyFile(event) {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    try {
+      const text = await file.text();
+      this.apiKey = text.trim();
+      this.apiKeyInput.value = this.apiKey;
+      localStorage.setItem('gemini_api_key', this.apiKey);
+      this.updateApiKeyStatus(true, 'ファイルから読み込み完了');
+      this.updateTranscribeButton();
+    } catch (err) {
+      this.updateApiKeyStatus(false, '読み込み失敗');
+    }
+  }
+
+  updateApiKeyStatus(success, message = '') {
+    if (success) {
+      this.apiKeyStatus.textContent = message || '✓ 設定済み';
+      this.apiKeyStatus.className = 'status-badge success';
+    } else {
+      this.apiKeyStatus.textContent = message || '';
+      this.apiKeyStatus.className = message ? 'status-badge error' : 'status-badge';
+    }
+  }
+
+  // ===== Drive =====
+
+  initPickerLoader() {
+    const poll = () => {
+      if (!window.gapi) return setTimeout(poll, 120);
+      try {
+        window.gapi.load('picker', {
+          callback: () => { this.pickerReady = true; this.refreshDriveUi(); }
+        });
+      } catch {
+        setTimeout(poll, 250);
+      }
+    };
+    poll();
+  }
+
+  refreshDriveUi() {
+    const canPick = !!this.oauthToken && this.pickerReady && !!window.google?.picker;
+    this.drivePickBtn.disabled = !canPick;
+    if (!this.driveStatus.textContent) this.driveStatus.textContent = canPick ? '接続済み' : '未接続';
+  }
+
+  driveLogin() {
+    if (!window.google?.accounts?.oauth2) {
+      this.driveStatus.textContent = 'Google認証の読み込み待ちです';
+      this.driveStatus.className = 'status-badge error';
+      return;
+    }
+    if (!this.tokenClient) {
+      this.tokenClient = window.google.accounts.oauth2.initTokenClient({
+        client_id: GCP_OAUTH_CLIENT_ID,
+        scope: DRIVE_SCOPES,
+        callback: (resp) => {
+          if (resp?.access_token) {
+            this.oauthToken = resp.access_token;
+            this.driveStatus.textContent = '接続済み';
+            this.driveStatus.className = 'status-badge success';
+            this.refreshDriveUi();
+          } else {
+            this.driveStatus.textContent = '接続失敗';
+            this.driveStatus.className = 'status-badge error';
+          }
+        }
+      });
+    }
+    this.tokenClient.requestAccessToken({ prompt: '' });
+  }
+
+  async openDrivePicker() {
+    try {
+      if (!this.oauthToken) throw new Error('Driveに未接続です');
+      if (!this.pickerReady || !window.google?.picker) throw new Error('Pickerの準備中です');
+
+      const view = new window.google.picker.DocsView(window.google.picker.ViewId.DOCS)
+        .setIncludeFolders(false)
+        .setMimeTypes([
+          'audio/mpeg','audio/mp3','audio/mp4','audio/wav','audio/x-wav','audio/aac','audio/ogg','audio/webm','audio/flac',
+          'video/mp4','video/quicktime','video/webm','video/x-matroska'
+        ].join(','));
+
+      const picker = new window.google.picker.PickerBuilder()
+        .setOAuthToken(this.oauthToken)
+        .setDeveloperKey(GCP_API_KEY)
+        .addView(view)
+        .enableFeature(window.google.picker.Feature.SUPPORT_DRIVES) // 共有ドライブ/共有アイテムも対象
+        .setCallback((data) => this.onDrivePicked(data))
+        .build();
+
+      picker.setVisible(true);
+    } catch (e) {
+      this.driveStatus.textContent = e?.message || String(e);
+      this.driveStatus.className = 'status-badge error';
+    }
+  }
+
+  async onDrivePicked(data) {
+    const Action = window.google.picker.Action;
+    if (data.action !== Action.PICKED) return;
+
+    const doc = data.docs?.[0];
+    if (!doc?.id) return;
+
+    try {
+      const fileId = await this.resolveShortcut(doc.id);
+      const meta = await this.getDriveMeta(fileId);
+      const name = meta.name || doc.name || 'drive_file';
+      const mimeType = meta.mimeType || doc.mimeType || 'application/octet-stream';
+      const size = Number(meta.size || 0);
+
+      const item = {
+        id: crypto.randomUUID(),
+        name,
+        size,
+        mimeType,
+        source: 'drive',
+        getBlob: async () => this.downloadDriveBlob(fileId)
+      };
+
+      this.files.push(item);
+      this.renderFileList();
+      this.updateTranscribeButton();
+    } catch (e) {
+      this.driveStatus.textContent = `取得失敗: ${e?.message || e}`;
+      this.driveStatus.className = 'status-badge error';
+    }
+  }
+
+  async resolveShortcut(fileId) {
+    try {
+      const meta = await this.getDriveMeta(fileId, 'mimeType,shortcutDetails');
+      if (meta?.mimeType === 'application/vnd.google-apps.shortcut' && meta.shortcutDetails?.targetId) {
+        return meta.shortcutDetails.targetId;
+      }
+    } catch {}
+    return fileId;
+  }
+
+  async getDriveMeta(fileId, fields = 'id,name,mimeType,size,shortcutDetails') {
+    const url = new URL(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}`);
+    url.searchParams.set('fields', fields);
+    url.searchParams.set('supportsAllDrives', 'true');
+
+    const res = await fetch(url.toString(), {
+      headers: { Authorization: `Bearer ${this.oauthToken}` }
+    });
+    if (!res.ok) throw new Error(`Drive metadata: HTTP ${res.status}`);
+    return res.json();
+  }
+
+  async downloadDriveBlob(fileId) {
+    const url = new URL(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}`);
+    url.searchParams.set('alt', 'media');
+    url.searchParams.set('supportsAllDrives', 'true');
+
+    const res = await fetch(url.toString(), {
+      headers: { Authorization: `Bearer ${this.oauthToken}` }
+    });
+    if (!res.ok) throw new Error(`Drive download: HTTP ${res.status}`);
+    return res.blob();
+  }
+
+  // ===== Local file =====
+
+  onDragOver(e) { e.preventDefault(); this.dropzone.classList.add('dragover'); }
+  onDragLeave() { this.dropzone.classList.remove('dragover'); }
+
+  onDrop(e) {
+    e.preventDefault();
+    this.dropzone.classList.remove('dragover');
+    const files = Array.from(e.dataTransfer.files || []);
+    this.addLocalFiles(files);
+  }
+
+  onFileSelect(e) {
+    const files = Array.from(e.target.files || []);
+    this.addLocalFiles(files);
+    e.target.value = '';
+  }
+
+  addLocalFiles(files) {
+    const audioFiles = files.filter(file =>
+      file.type.startsWith('audio/') ||
+      file.type.startsWith('video/') ||
+      /\.(mp3|wav|m4a|webm|ogg|mp4|flac|mov)$/i.test(file.name)
+    );
+
+    const mapped = audioFiles.map(f => ({
+      id: crypto.randomUUID(),
+      name: f.name,
+      size: f.size,
+      mimeType: f.type || this.guessMime(f.name),
+      source: 'local',
+      getBlob: async () => f
+    }));
+
+    this.files.push(...mapped);
+    this.renderFileList();
+    this.updateTranscribeButton();
+  }
+
+  removeFileById(id) {
+    this.files = this.files.filter(f => f.id !== id);
+    this.renderFileList();
+    this.updateTranscribeButton();
+  }
+
+  renderFileList() {
+    if (this.files.length === 0) {
+      this.fileList.innerHTML = '';
+      return;
+    }
+
+    this.fileList.innerHTML = this.files.map((file) => `
+      <div class="file-item">
+        <div class="file-item-info">
+          <span class="file-item-icon">${file.source === 'drive' ? '☁️' : '🎵'}</span>
+          <div>
+            <div class="file-item-name">${this.escapeHtml(file.name)}</div>
+            <div class="file-item-size">${this.formatFileSize(file.size)}${file.source === 'drive' ? '（Drive）' : ''}</div>
+          </div>
+        </div>
+        <button class="file-item-remove" data-remove="${file.id}" title="削除" type="button">✕</button>
+      </div>
+    `).join('');
+
+    this.fileList.querySelectorAll('[data-remove]').forEach(btn => {
+      btn.addEventListener('click', () => this.removeFileById(btn.getAttribute('data-remove')));
+    });
+  }
+
+  formatFileSize(bytes) {
+    if (!Number.isFinite(bytes)) return '—';
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  }
+
+  updateTranscribeButton() {
+    this.transcribeBtn.disabled = !this.apiKey || this.files.length === 0 || this.isProcessing;
+  }
+
+  // ===== Transcription pipeline =====
+
+  async startTranscription() {
+    if (this.isProcessing) return;
+
+    this.apiKey = (this.apiKeyInput.value || '').trim();
+    if (!this.apiKey) {
+      this.updateApiKeyStatus(false, 'APIキーを入力してください');
+      return;
+    }
+
+    this.isProcessing = true;
+    this.updateTranscribeButton();
+
+    this.progressSection.style.display = 'block';
+    this.resultsSection.style.display = 'block';
+    this.resultsList.innerHTML = '';
+
+    const total = this.files.length;
+
+    for (let i = 0; i < total; i++) {
+      const f = this.files[i];
+      const pct = Math.floor((i / total) * 100);
+      this.progressFill.style.width = `${pct}%`;
+      this.progressText.textContent = `処理中: ${f.name} (${i + 1}/${total})`;
+
+      await this.transcribeOne(f, i);
+    }
+
+    this.progressFill.style.width = '100%';
+    this.progressText.textContent = `完了！ ${total}ファイルを処理しました`;
+
+    this.isProcessing = false;
+    this.files = [];
+    this.renderFileList();
+    this.updateTranscribeButton();
+  }
+
+  async transcribeOne(fileItem, index) {
+    const resultId = `result-${index}-${fileItem.id}`;
+
+    this.resultsList.innerHTML += `
+      <div class="result-item" id="${resultId}">
+        <div class="result-header">
+          <span class="result-filename">📄 ${this.escapeHtml(fileItem.name)}</span>
+          <span class="status-badge" id="${resultId}-status">アップロード準備...</span>
+        </div>
+        <div class="result-tabs">
+          <button class="tab-btn active" data-tab="chat" data-for="${resultId}" type="button">チャット</button>
+          <button class="tab-btn" data-tab="json" data-for="${resultId}" type="button">JSON</button>
+        </div>
+        <div class="chat-view" id="${resultId}-chat">準備中...</div>
+        <pre class="json-view" id="${resultId}-json" style="display:none;">準備中...</pre>
+      </div>
+    `;
+
+    this.bindResultTabs(resultId);
+
+    const statusEl = document.getElementById(`${resultId}-status`);
+    const chatEl = document.getElementById(`${resultId}-chat`);
+    const jsonEl = document.getElementById(`${resultId}-json`);
+
+    try {
+      statusEl.textContent = 'ファイル取得中...';
+      const blob = await fileItem.getBlob();
+      const mimeType = fileItem.mimeType || blob.type || 'application/octet-stream';
+
+      statusEl.textContent = 'アップロード中...';
+      const uploaded = await this.uploadFileToGemini(blob, fileItem.name);
+
+      statusEl.textContent = 'ファイル処理待ち...';
+      await this.waitForFileActive(uploaded.name);
+
+      statusEl.textContent = '文字起こし中...';
+      const prompt = this.buildPrompt(this.speakerCount);
+
+      const resultText = await this.generateWithFile(uploaded.uri, mimeType, prompt);
+
+      const parsed = this.safeJsonParseMaybe(resultText);
+      const pretty = parsed ? JSON.stringify(parsed, null, 2) : resultText;
+
+      jsonEl.textContent = pretty;
+
+      const segments = this.extractSegments(parsed, resultText);
+      chatEl.innerHTML = this.renderChatHtml(segments);
+
+      statusEl.textContent = '完了';
+      statusEl.className = 'status-badge success';
+
+      // cleanup（失敗しても無視）
+      try {
+        await fetch(`https://generativelanguage.googleapis.com/v1beta/${uploaded.name}?key=${encodeURIComponent(this.apiKey)}`, {
+          method: 'DELETE'
+        });
+      } catch {}
+
+    } catch (e) {
+      const msg = this.normalizeFetchError(e);
+      statusEl.textContent = 'エラー';
+      statusEl.className = 'status-badge error';
+      chatEl.innerHTML = `<div class="result-error">❌ ${this.escapeHtml(msg)}</div>`;
+      jsonEl.textContent = msg;
+    }
+  }
+
+  bindResultTabs(resultId) {
+    const root = document.getElementById(resultId);
+    if (!root) return;
+
+    root.querySelectorAll('.tab-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const tab = btn.getAttribute('data-tab');
+        root.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+
+        const chat = document.getElementById(`${resultId}-chat`);
+        const json = document.getElementById(`${resultId}-json`);
+        if (tab === 'chat') {
+          chat.style.display = 'block';
+          json.style.display = 'none';
+        } else {
+          chat.style.display = 'none';
+          json.style.display = 'block';
+        }
+      });
+    });
+  }
+
+  buildPrompt(speakerCount) {
+    const n = this.clampSpeaker(speakerCount);
+    const labels = Array.from({ length: n }, (_, i) => `話者${i + 1}`).join('、');
+
+    return [
+      '音声/動画を日本語で文字起こししてください。',
+      '長くても最後まで諦めずに生成してください。',
+      '話者分離をして話者別にラベルを付けて出力してください。',
+      '文字起こし以外の説明、コメント、タイムスタンプは禁止します。',
+      '',
+      `話者は ${n} 人です。使用できる話者ラベルは次のみ: ${labels}`,
+      '',
+      '出力は必ずJSONのみ。以下の形式に厳密に従ってください。',
+      '{',
+      '  "segments": [',
+      '    { "speaker": "話者1", "text": "..." },',
+      '    { "speaker": "話者2", "text": "..." }',
+      '  ]',
+      '}'
+    ].join('\n');
+  }
+
+  async uploadFileToGemini(blob, displayName) {
+    // ブラウザで通りやすい FormData 方式（仕切り直しの要点）
+    const formData = new FormData();
+    // name指定はブラウザ依存なので、ファイル名はここで付ける
+    const file = new File([blob], displayName || 'media', { type: blob.type || 'application/octet-stream' });
+    formData.append('file', file);
+
+    const res = await fetch(
+      `https://generativelanguage.googleapis.com/upload/v1beta/files?key=${encodeURIComponent(this.apiKey)}`,
+      { method: 'POST', body: formData }
+    );
+
+    if (!res.ok) {
+      let err;
+      try { err = await res.json(); } catch {}
+      throw new Error(err?.error?.message || `Upload failed: HTTP ${res.status}`);
+    }
+
+    const data = await res.json();
+    const uri = data?.file?.uri;
+    const name = data?.file?.name;
+    if (!uri || !name) throw new Error('Upload response is missing file.uri or file.name');
+    return { uri, name };
+  }
+
+  async waitForFileActive(fileName) {
+    const maxAttempts = 90;
+    for (let i = 0; i < maxAttempts; i++) {
+      const res = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/${fileName}?key=${encodeURIComponent(this.apiKey)}`,
+        { method: 'GET' }
+      );
+
+      if (res.ok) {
+        const data = await res.json();
+        if (data?.state === 'ACTIVE') return;
+        if (data?.state === 'FAILED') throw new Error('File processing failed');
+      }
+
+      await new Promise(r => setTimeout(r, 1000));
+    }
+    throw new Error('File processing timeout');
+  }
+
+  async generateWithFile(fileUri, mimeType, prompt) {
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(this.model)}:generateContent?key=${encodeURIComponent(this.apiKey)}`;
+
+    // 1st: camelCase（推奨）
+    const body1 = {
+      contents: [{
+        role: 'user',
+        parts: [
+          { text: prompt },
+          { fileData: { mimeType: mimeType || 'application/octet-stream', fileUri } }
+        ]
+      }],
+      generationConfig: {
+        responseMimeType: 'application/json',
+        maxOutputTokens: 8192,
+        temperature: 0.2
+      }
+    };
+
+    let res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body1)
+    });
+
+    let data = null;
+    try { data = await res.json(); } catch {}
+
+    // fallback: snake_case
+    if (!res.ok) {
+      const body2 = {
+        contents: [{
+          parts: [
+            { text: prompt },
+            { file_data: { mime_type: mimeType || 'application/octet-stream', file_uri: fileUri } }
+          ]
+        }],
+        generation_config: {
+          response_mime_type: 'application/json',
+          max_output_tokens: 8192,
+          temperature: 0.2
+        }
+      };
+
+      res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body2)
+      });
+
+      try { data = await res.json(); } catch {}
+    }
+
+    if (!res.ok) {
+      throw new Error(data?.error?.message || `API Error: HTTP ${res.status}`);
+    }
+
+    const text = data?.candidates?.[0]?.content?.parts?.map(p => p.text).filter(Boolean).join('') || '';
+    return text || JSON.stringify(data, null, 2);
+  }
+
+  extractSegments(parsed, rawText) {
+    if (parsed && Array.isArray(parsed.segments)) {
+      return parsed.segments
+        .map(s => ({
+          speaker: this.normalizeSpeaker(s?.speaker),
+          text: String(s?.text ?? '').trim()
+        }))
+        .filter(x => x.text);
+    }
+
+    // JSONが崩れた場合の最終フォールバック
+    const fallback = String(rawText || '').trim();
+    return fallback ? [{ speaker: '話者?', text: fallback }] : [];
+  }
+
+  renderChatHtml(segments) {
+    if (!segments.length) return '結果が空でした。';
+
+    return segments.map(seg => {
+      const sp = seg.speaker;
+      const idx = this.speakerIndex(sp);
+      const cls = idx ? `msg spk-${idx}` : 'msg';
+      return `
+        <div class="${cls}">
+          <div class="avatar">${this.escapeHtml(sp)}</div>
+          <div class="bubble">
+            <div class="meta">${this.escapeHtml(sp)}</div>
+            <div class="text">${this.escapeHtml(seg.text)}</div>
+          </div>
+        </div>
+      `;
+    }).join('');
+  }
+
+  // ===== Utilities =====
+
+  clampSpeaker(n) {
     const x = Number(n);
     if (!Number.isFinite(x)) return 2;
-    return Math.max(1, Math.min(10, Math.floor(x)));
+    return Math.max(1, Math.min(20, Math.floor(x)));
   }
 
-  function bytesToHuman(bytes) {
-    if (!Number.isFinite(bytes) || bytes <= 0) return '—';
-    const units = ['B', 'KB', 'MB', 'GB'];
-    let v = bytes, u = 0;
-    while (v >= 1024 && u < units.length - 1) { v /= 1024; u += 1; }
-    return `${v.toFixed(v >= 10 || u === 0 ? 0 : 1)} ${units[u]}`;
-  }
-
-  function safeJsonParseMaybe(text) {
-    if (typeof text !== 'string') return null;
-    const trimmed = text.trim();
-    if (!trimmed) return null;
-    try { return JSON.parse(trimmed); } catch {}
-
-    const firstObj = trimmed.indexOf('{');
-    const lastObj = trimmed.lastIndexOf('}');
-    if (firstObj !== -1 && lastObj !== -1 && lastObj > firstObj) {
-      try { return JSON.parse(trimmed.slice(firstObj, lastObj + 1)); } catch {}
-    }
-    return null;
-  }
-
-  function toCamelGenerateRequest(body) {
-    const out = JSON.parse(JSON.stringify(body || {}));
-    if (out.generation_config) {
-      out.generationConfig = out.generation_config;
-      delete out.generation_config;
-      if (out.generationConfig.response_mime_type) {
-        out.generationConfig.responseMimeType = out.generationConfig.response_mime_type;
-        delete out.generationConfig.response_mime_type;
-      }
-      if (out.generationConfig.max_output_tokens != null) {
-        out.generationConfig.maxOutputTokens = out.generationConfig.max_output_tokens;
-        delete out.generationConfig.max_output_tokens;
-      }
-    }
-
-    const contents = Array.isArray(out.contents) ? out.contents : [];
-    for (const c of contents) {
-      const parts = Array.isArray(c.parts) ? c.parts : [];
-      for (const p of parts) {
-        if (p.inline_data) {
-          p.inlineData = p.inline_data;
-          delete p.inline_data;
-          if (p.inlineData.mime_type) {
-            p.inlineData.mimeType = p.inlineData.mime_type;
-            delete p.inlineData.mime_type;
-          }
-        }
-        if (p.file_data) {
-          p.fileData = p.file_data;
-          delete p.file_data;
-          if (p.fileData.mime_type) {
-            p.fileData.mimeType = p.fileData.mime_type;
-            delete p.fileData.mime_type;
-          }
-          if (p.fileData.file_uri) {
-            p.fileData.fileUri = p.fileData.file_uri;
-            delete p.fileData.file_uri;
-          }
-        }
-      }
-    }
-    return out;
-  }
-
-  function toCamelFileUploadBody(body) {
-    const out = JSON.parse(JSON.stringify(body || {}));
-    if (out.file?.display_name) {
-      out.file.displayName = out.file.display_name;
-      delete out.file.display_name;
-    }
-    return out;
-  }
-
-  function normalizeSpeakerLabel(raw) {
-    if (!raw) return '話者?';
-    const s = String(raw).trim();
+  normalizeSpeaker(label) {
+    const s = String(label || '').trim();
     const m = s.match(/(\d{1,2})/);
-    if (m) return `話者${clampSpeakerCount(parseInt(m[1], 10))}`;
+    if (m) return `話者${this.clampSpeaker(parseInt(m[1], 10))}`;
+    if (!s) return '話者?';
     if (s.startsWith('話者')) return s;
     return s;
   }
 
-  function speakerIndexFromLabel(label) {
+  speakerIndex(label) {
     const m = String(label || '').match(/(\d{1,2})/);
     if (!m) return 0;
-    return clampSpeakerCount(parseInt(m[1], 10));
+    return this.clampSpeaker(parseInt(m[1], 10));
   }
 
-  class TranscriberApp {
-    constructor() {
-      this.apiKeyInput = $('apiKeyInput');
-      this.saveKeyBtn = $('saveKeyBtn');
-      this.toggleKeyBtn = $('toggleKeyBtn');
-      this.keyStatus = $('keyStatus');
-
-      this.modelSelect = $('modelSelect');
-      this.speakerCountSelect = $('speakerCountSelect');
-
-      this.tabDrive = $('tabDrive');
-      this.tabLocal = $('tabLocal');
-      this.drivePanel = $('drivePanel');
-      this.localPanel = $('localPanel');
-
-      this.driveConnectBtn = $('driveConnectBtn');
-      this.driveStatus = $('driveStatus');
-      this.pickFileBtn = $('pickFileBtn');
-      this.selectedFileName = $('selectedFileName');
-
-      this.localFileInput = $('localFileInput');
-      this.localFileName = $('localFileName');
-
-      this.startBtn = $('startBtn');
-      this.progressBar = $('progressBar');
-      this.progressText = $('progressText');
-      this.promptPreview = $('promptPreview');
-
-      this.chatThread = $('chatThread');
-      this.jsonOutput = $('jsonOutput');
-      this.downloadJsonBtn = $('downloadJsonBtn');
-
-      this.geminiApiKey = '';
-      this.geminiModel = 'gemini-3-flash-preview';
-      this.speakerCount = 2;
-
-      this.oauthToken = '';
-      this.tokenClient = null;
-
-      this.selectedFile = null; // { name, mimeType, size, getBlob():Promise<Blob> }
-      this.latestJsonText = '';
-
-      this.init();
+  safeJsonParseMaybe(text) {
+    if (typeof text !== 'string') return null;
+    const t = text.trim();
+    if (!t) return null;
+    try { return JSON.parse(t); } catch {}
+    const a = t.indexOf('{');
+    const b = t.lastIndexOf('}');
+    if (a !== -1 && b !== -1 && b > a) {
+      try { return JSON.parse(t.slice(a, b + 1)); } catch {}
     }
+    return null;
+  }
 
-    init() {
-      this.initSpeakerSelect();
-      this.loadSettings();
-      this.bindEvents();
-      this.renderPromptPreview();
-      this.prepareGapiPickerLoad();
+  guessMime(name) {
+    const n = (name || '').toLowerCase();
+    if (n.endsWith('.mp3')) return 'audio/mpeg';
+    if (n.endsWith('.wav')) return 'audio/wav';
+    if (n.endsWith('.m4a')) return 'audio/mp4';
+    if (n.endsWith('.ogg')) return 'audio/ogg';
+    if (n.endsWith('.webm')) return 'audio/webm';
+    if (n.endsWith('.flac')) return 'audio/flac';
+    if (n.endsWith('.mp4')) return 'video/mp4';
+    if (n.endsWith('.mov')) return 'video/quicktime';
+    return 'application/octet-stream';
+  }
 
-      // iPhoneでページが戻った（実質リロード）場合でも、ログイン状態だけ復元
-      const savedToken = sessionStorage.getItem(SS_DRIVE_TOKEN);
-      if (savedToken) {
-        this.oauthToken = savedToken;
-        this.driveStatus.textContent = '接続済み（復元）';
-      }
+  escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = String(text ?? '');
+    return div.innerHTML;
+  }
 
-      this.updateUiState();
-    }
-
-    initSpeakerSelect() {
-      this.speakerCountSelect.innerHTML = '';
-      for (let i = 1; i <= 10; i += 1) {
-        const opt = document.createElement('option');
-        opt.value = String(i);
-        opt.textContent = String(i);
-        this.speakerCountSelect.appendChild(opt);
-      }
-    }
-
-    loadSettings() {
-      const savedKey = localStorage.getItem(LS_GEMINI_KEY);
-      if (savedKey) {
-        this.geminiApiKey = savedKey;
-        this.apiKeyInput.value = savedKey;
-        this.keyStatus.textContent = '保存済み';
-      }
-
-      const savedSpeaker = localStorage.getItem(LS_SPEAKER_COUNT);
-      if (savedSpeaker) this.speakerCount = clampSpeakerCount(savedSpeaker);
-
-      const savedModel = localStorage.getItem(LS_MODEL);
-      if (savedModel) this.geminiModel = savedModel;
-
-      this.speakerCountSelect.value = String(this.speakerCount);
-      this.modelSelect.value = this.geminiModel;
-    }
-
-    bindEvents() {
-      this.saveKeyBtn.addEventListener('click', () => this.onSaveKey());
-      this.toggleKeyBtn.addEventListener('click', () => this.onToggleKeyVisibility());
-
-      this.modelSelect.addEventListener('change', () => {
-        this.geminiModel = this.modelSelect.value;
-        localStorage.setItem(LS_MODEL, this.geminiModel);
-      });
-
-      this.speakerCountSelect.addEventListener('change', () => {
-        this.speakerCount = clampSpeakerCount(this.speakerCountSelect.value);
-        localStorage.setItem(LS_SPEAKER_COUNT, String(this.speakerCount));
-        this.renderPromptPreview();
-      });
-
-      this.tabDrive.addEventListener('click', () => this.setSource('drive'));
-      this.tabLocal.addEventListener('click', () => this.setSource('local'));
-
-      this.driveConnectBtn.addEventListener('click', () => this.onDriveConnect());
-      this.pickFileBtn.addEventListener('click', () => this.onPickDriveFile());
-
-      this.localFileInput.addEventListener('change', () => this.onLocalFileSelected());
-
-      this.startBtn.addEventListener('click', () => this.onStartTranscription());
-      this.downloadJsonBtn.addEventListener('click', () => this.downloadLatestJson());
-    }
-
-    setSource(which) {
-      const isDrive = which === 'drive';
-      this.tabDrive.classList.toggle('is-active', isDrive);
-      this.tabLocal.classList.toggle('is-active', !isDrive);
-      this.drivePanel.classList.toggle('is-hidden', !isDrive);
-      this.localPanel.classList.toggle('is-hidden', isDrive);
-      this.updateUiState();
-    }
-
-    onSaveKey() {
-      const v = (this.apiKeyInput.value || '').trim();
-      if (!v) {
-        this.keyStatus.textContent = '未設定（空です）';
-        this.geminiApiKey = '';
-        localStorage.removeItem(LS_GEMINI_KEY);
-        this.updateUiState();
-        return;
-      }
-      this.geminiApiKey = v;
-      localStorage.setItem(LS_GEMINI_KEY, v);
-      this.keyStatus.textContent = '保存しました';
-      this.updateUiState();
-    }
-
-    onToggleKeyVisibility() {
-      const isPassword = this.apiKeyInput.type === 'password';
-      this.apiKeyInput.type = isPassword ? 'text' : 'password';
-      this.toggleKeyBtn.textContent = isPassword ? '隠す' : '表示';
-    }
-
-    updateUiState() {
-      const hasKey = !!(this.geminiApiKey || (this.apiKeyInput.value || '').trim());
-      const hasFile = !!this.selectedFile;
-      const driveReady = !!this.oauthToken && !!window.google?.picker;
-
-      this.pickFileBtn.disabled = !driveReady;
-      this.startBtn.disabled = !(hasKey && hasFile);
-    }
-
-    prepareGapiPickerLoad() {
-      const poll = async () => {
-        if (!window.gapi) { setTimeout(poll, 150); return; }
-        try { window.gapi.load('picker', { callback: () => {} }); }
-        catch { setTimeout(poll, 300); }
-      };
-      poll();
-    }
-
-    onDriveConnect() {
-      if (!window.google?.accounts?.oauth2) {
-        this.driveStatus.textContent = 'Google Identity Services が未ロードです';
-        return;
-      }
-      if (!this.tokenClient) {
-        this.tokenClient = window.google.accounts.oauth2.initTokenClient({
-          client_id: GCP_OAUTH_CLIENT_ID,
-          scope: DRIVE_SCOPES,
-          callback: (resp) => {
-            if (resp?.access_token) {
-              this.oauthToken = resp.access_token;
-              sessionStorage.setItem(SS_DRIVE_TOKEN, resp.access_token);
-              this.driveStatus.textContent = '接続済み';
-              this.updateUiState();
-            } else {
-              this.driveStatus.textContent = '接続失敗';
-            }
-          }
-        });
-      }
-      // iOSでも確実に返るよう、必要に応じて consent を出す運用が安全だが、
-      // まずは prompt:'' で試し、失敗時はユーザーが再クリックすれば consent が出るようにしている。
-      this.tokenClient.requestAccessToken({ prompt: '' });
-    }
-
-    async ensurePickerReady() {
-      const start = Date.now();
-      while (!window.google?.picker) {
-        if (Date.now() - start > 8000) throw new Error('Picker のロードに失敗しました');
-        await new Promise(r => setTimeout(r, 120));
-      }
-      return true;
-    }
-
-    async onPickDriveFile() {
-      try {
-        await this.ensurePickerReady();
-        if (!this.oauthToken) throw new Error('Drive に未接続です');
-
-        const view = new window.google.picker.DocsView(window.google.picker.ViewId.DOCS)
-          .setIncludeFolders(false)
-          .setMimeTypes([
-            'audio/mpeg','audio/mp3','audio/mp4','audio/wav','audio/x-wav','audio/aac','audio/ogg','audio/webm','audio/flac',
-            'video/mp4','video/quicktime','video/webm','video/x-matroska'
-          ].join(','));
-
-        const picker = new window.google.picker.PickerBuilder()
-          .setAppId('478200222114')
-          .setOAuthToken(this.oauthToken)
-          .setDeveloperKey(GCP_API_KEY)
-          .addView(view)
-          .enableFeature(window.google.picker.Feature.SUPPORT_DRIVES) // 共有も対象
-          .setCallback((data) => this.onDriveFilePicked(data))
-          .build();
-
-        picker.setVisible(true);
-      } catch (e) {
-        this.driveStatus.textContent = `ファイル選択エラー: ${e?.message || e}`;
-      }
-    }
-
-    async onDriveFilePicked(data) {
-      const Action = window.google.picker.Action;
-      if (data.action !== Action.PICKED) return;
-
-      const doc = data.docs?.[0];
-      if (!doc?.id) return;
-
-      const resolvedId = await this.resolveDriveShortcutIfNeeded(doc.id);
-      const meta = await this.getDriveFileMeta(resolvedId);
-
-      const finalName = meta.name || doc.name || 'drive_file';
-      const finalMime = meta.mimeType || doc.mimeType || 'application/octet-stream';
-      const finalSize = Number(meta.size || doc.sizeBytes || doc.size || 0);
-
-      this.selectedFile = {
-        name: finalName,
-        mimeType: finalMime,
-        size: finalSize,
-        getBlob: async () => this.downloadDriveFileBlob(resolvedId)
-      };
-
-      this.selectedFileName.textContent = `${finalName} (${bytesToHuman(finalSize)})`;
-      this.localFileName.textContent = '未選択';
-      this.localFileInput.value = '';
-
-      this.updateUiState();
-      this.renderPromptPreview();
-    }
-
-    async resolveDriveShortcutIfNeeded(fileId) {
-      try {
-        const meta = await this.getDriveFileMeta(fileId, 'mimeType,shortcutDetails');
-        if (meta?.mimeType === 'application/vnd.google-apps.shortcut' && meta.shortcutDetails?.targetId) {
-          return meta.shortcutDetails.targetId;
-        }
-      } catch {}
-      return fileId;
-    }
-
-    async getDriveFileMeta(fileId, fields = 'id,name,mimeType,size,shortcutDetails') {
-      const url = new URL(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}`);
-      url.searchParams.set('fields', fields);
-      url.searchParams.set('supportsAllDrives', 'true');
-
-      const res = await fetch(url.toString(), {
-        headers: { Authorization: `Bearer ${this.oauthToken}` }
-      });
-      if (!res.ok) throw new Error(`Drive metadata 取得失敗: ${res.status}`);
-      return res.json();
-    }
-
-    async downloadDriveFileBlob(fileId) {
-      const url = new URL(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}`);
-      url.searchParams.set('alt', 'media');
-      url.searchParams.set('supportsAllDrives', 'true');
-
-      const res = await fetch(url.toString(), {
-        headers: { Authorization: `Bearer ${this.oauthToken}` }
-      });
-      if (!res.ok) throw new Error(`Drive download 失敗: ${res.status}`);
-      return res.blob();
-    }
-
-    onLocalFileSelected() {
-      const f = this.localFileInput.files?.[0];
-      if (!f) {
-        this.localFileName.textContent = '未選択';
-        this.selectedFile = null;
-        this.updateUiState();
-        return;
-      }
-      this.localFileName.textContent = `${f.name} (${bytesToHuman(f.size)})`;
-      this.selectedFileName.textContent = `${f.name} (${bytesToHuman(f.size)})`;
-
-      this.selectedFile = { name: f.name, mimeType: f.type || 'application/octet-stream', size: f.size, getBlob: async () => f };
-      this.updateUiState();
-      this.renderPromptPreview();
-    }
-
-    buildPrompt() {
-      const n = clampSpeakerCount(this.speakerCount);
-      const speakerList = Array.from({ length: n }, (_, i) => `話者${i + 1}`).join('、');
-
-      const schema = {
-        type: 'object',
-        properties: {
-          segments: {
-            type: 'array',
-            items: {
-              type: 'object',
-              properties: {
-                speaker: { type: 'string', description: `必ず ${speakerList} のいずれか` },
-                text: { type: 'string' }
-              },
-              required: ['speaker', 'text'],
-              additionalProperties: false
-            }
-          }
-        },
-        required: ['segments'],
-        additionalProperties: false
-      };
-
-      const prompt = [
-        '音声/動画を日本語で文字起こししてください。',
-        '長くても最後まで諦めずに生成してください。',
-        '話者分離を行い、話者別にラベルを付けてください。',
-        '文字起こし以外の説明、コメント、タイムスタンプは禁止します。',
-        '',
-        `話者は ${n} 人です。使用できる話者ラベル: ${speakerList}`,
-        '',
-        '出力は必ず JSON のみ。次の JSON Schema に厳密に従ってください:',
-        JSON.stringify(schema, null, 2)
+  normalizeFetchError(e) {
+    // fetch のネットワークエラーは TypeError: Failed to fetch になりがち
+    const msg = e?.message || String(e);
+    if (msg === 'Failed to fetch') {
+      return [
+        'Failed to fetch（ネットワーク/CORS/ブロックの可能性）',
+        '・企業ネットワーク/拡張機能/セキュリティで generativelanguage.googleapis.com が遮断されていないか',
+        '・DevToolsのNetworkで該当リクエストが(OPTIONS含め)失敗していないか',
+        '・別タブでGoogleログインが必要な状態になっていないか'
       ].join('\n');
-
-      return { prompt };
     }
+    return msg;
+  }
+}
 
-    renderPromptPreview() {
-      const { prompt } = this.buildPrompt();
-      this.promptPreview.textContent = prompt;
-    }
-
-    setProgress(percent, text) {
-      const p = Math.max(0, Math.min(100, Number(percent) || 0));
-      this.progressBar.style.width = `${p}%`;
-      this.progressText.textContent = text || '';
-    }
-
-    async onStartTranscription() {
-      try {
-        this.geminiApiKey = (this.geminiApiKey || (this.apiKeyInput.value || '').trim());
-        if (!this.geminiApiKey) throw new Error('Gemini API Key が未設定です');
-        if (!this.selectedFile) throw new Error('ファイルが未選択です');
-
-        this.startBtn.disabled = true;
-        this.downloadJsonBtn.disabled = true;
-        this.chatThread.innerHTML = '';
-        this.jsonOutput.textContent = '';
-        this.latestJsonText = '';
-
-        this.setProgress(5, 'ファイル準備中...');
-        const blob = await this.selectedFile.getBlob();
-        const mimeType = this.selectedFile.mimeType || blob.type || 'application/octet-stream';
-        const displayName = this.selectedFile.name || 'media';
-
-        // iPhone/iPad は常に Files API（inline/base64を使わない）
-        const useFilesApi = isIOSLike() || blob.size > INLINE_MAX_BYTES;
-
-        this.setProgress(15, useFilesApi ? 'Files API へアップロード中...' : 'インライン送信準備中...');
-
-        let resultText = '';
-        if (useFilesApi) {
-          const fileInfo = await this.uploadViaFilesApi(blob, mimeType, displayName);
-          this.setProgress(55, 'Gemini に文字起こしリクエスト中...');
-          resultText = await this.generateWithFileUri(fileInfo.file.uri, mimeType);
-        } else {
-          const base64 = await this.blobToBase64(blob);
-          this.setProgress(55, 'Gemini に文字起こしリクエスト中...');
-          resultText = await this.generateWithInline(base64, mimeType);
-        }
-
-        this.setProgress(80, '結果を解析中...');
-        this.latestJsonText = resultText;
-        this.jsonOutput.textContent = this.prettyJsonOrRaw(resultText);
-        this.downloadJsonBtn.disabled = false;
-
-        const parsed = safeJsonParseMaybe(resultText);
-        const messages = this.extractMessages(parsed, resultText);
-        this.renderChat(messages);
-
-        this.setProgress(100, '完了');
-      } catch (e) {
-        this.setProgress(0, `エラー: ${e?.message || e}`);
-      } finally {
-        this.updateUiState();
-      }
-    }
-
-    prettyJsonOrRaw(text) {
-      const obj = safeJsonParseMaybe(text);
-      if (!obj) return String(text || '');
-      try { return JSON.stringify(obj, null, 2); } catch { return String(text || ''); }
-    }
-
-    extractMessages(parsed, rawText) {
-      const messages = [];
-      if (parsed && Array.isArray(parsed.segments)) {
-        for (const seg of parsed.segments) {
-          const speaker = normalizeSpeakerLabel(seg?.speaker);
-          const text = (seg?.text ?? '').toString();
-          if (!text.trim()) continue;
-          messages.push({ speaker, text });
-        }
-        return messages;
-      }
-      const fallback = String(rawText || '').trim();
-      if (fallback) messages.push({ speaker: '話者?', text: fallback });
-      return messages;
-    }
-
-    renderChat(messages) {
-      if (!messages.length) {
-        this.chatThread.innerHTML = '<div class="muted">結果が空でした。</div>';
-        return;
-      }
-      this.chatThread.innerHTML = '';
-      for (const m of messages) {
-        const label = normalizeSpeakerLabel(m.speaker);
-        const idx = speakerIndexFromLabel(label);
-
-        const row = document.createElement('div');
-        row.className = `msg-row ${idx ? `speaker-${idx}` : ''}`.trim();
-
-        const avatar = document.createElement('div');
-        avatar.className = 'avatar';
-        avatar.textContent = label; // S1ではなく「話者1」
-
-        const bubble = document.createElement('div');
-        bubble.className = 'bubble';
-
-        const meta = document.createElement('div');
-        meta.className = 'meta';
-        meta.textContent = label;
-
-        const text = document.createElement('div');
-        text.className = 'text';
-        text.textContent = m.text;
-
-        bubble.appendChild(meta);
-        bubble.appendChild(text);
-
-        row.appendChild(avatar);
-        row.appendChild(bubble);
-        this.chatThread.appendChild(row);
-      }
-    }
-
-    async generateWithInline(base64Data, mimeType) {
-      if (!base64Data) throw new Error('inline データが空です');
-      const { prompt } = this.buildPrompt();
-
-      const body = {
-        contents: [{
-          role: 'user',
-          parts: [{ text: prompt }, { inline_data: { mime_type: mimeType, data: base64Data } }]
-        }],
-        generation_config: { response_mime_type: 'application/json', max_output_tokens: 8192 }
-      };
-      return this.callGenerateContent(body);
-    }
-
-    async generateWithFileUri(fileUri, mimeType) {
-      if (!fileUri) throw new Error('file_uri が空です');
-      const { prompt } = this.buildPrompt();
-
-      const body = {
-        contents: [{
-          role: 'user',
-          parts: [{ text: prompt }, { file_data: { mime_type: mimeType, file_uri: fileUri } }]
-        }],
-        generation_config: { response_mime_type: 'application/json', max_output_tokens: 8192 }
-      };
-      return this.callGenerateContent(body);
-    }
-
-    async callGenerateContent(body) {
-      const url = `${GEMINI_BASE_URL}/v1beta/models/${encodeURIComponent(this.geminiModel)}:generateContent?key=${encodeURIComponent(this.geminiApiKey)}`;
-
-      let res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-      let json = await res.json().catch(() => null);
-
-      if (!res.ok) {
-        const msg = json?.error?.message || '';
-        const shouldRetry =
-          msg.includes('Unknown name') ||
-          msg.includes('Invalid JSON payload') ||
-          msg.includes('Cannot find field') ||
-          msg.includes('unknown field') ||
-          msg.includes('Unrecognized field');
-
-        if (shouldRetry) {
-          const altBody = toCamelGenerateRequest(body);
-          res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(altBody) });
-          json = await res.json().catch(() => null);
-        }
-      }
-
-      if (!res.ok) {
-        const msg = json?.error?.message || `HTTP ${res.status}`;
-        thro
+// Initialize
+let transcriber;
+document.addEventListener('DOMContentLoaded', () => {
+  transcriber = new GeminiTranscriber();
+});
