@@ -1,16 +1,3 @@
-/**
- * Chat Transcriber
- * - Speaker-separated JSON output
- * - Chat UI rendering
- * - Google Drive Picker (client-side)
- * - Gemini Files API (resumable upload) for large files
- *
- * Requirements:
- * - Browser-side API key (stored in localStorage)
- * - Drive Picker uses OAuth token (drive.readonly) to download selected audio
- * - Gemini API calls generativelanguage.googleapis.com (API key auth)
- */
-
 class ChatTranscriber {
   constructor() {
     // ===== DOM =====
@@ -20,7 +7,7 @@ class ChatTranscriber {
     this.apiKeyFile = document.getElementById('apiKeyFile');
     this.apiKeyStatus = document.getElementById('apiKeyStatus');
 
-    this.speakerCountInput = document.getElementById('speakerCount');
+    this.speakerCountInput = document.getElementById('speakerCount'); // select
     this.modelSelect = document.getElementById('modelSelect');
 
     this.tabDrive = document.getElementById('tabDrive');
@@ -30,6 +17,9 @@ class ChatTranscriber {
 
     this.driveConnectBtn = document.getElementById('driveConnectBtn');
     this.drivePickBtn = document.getElementById('drivePickBtn');
+    this.drivePickFolderBtn = document.getElementById('drivePickFolderBtn');
+    this.driveClearFolderBtn = document.getElementById('driveClearFolderBtn');
+    this.driveFolderLabel = document.getElementById('driveFolderLabel');
     this.driveStatus = document.getElementById('driveStatus');
 
     this.dropzone = document.getElementById('dropzone');
@@ -52,7 +42,7 @@ class ChatTranscriber {
     this.speakerCount = 2;
     this.model = this.modelSelect.value;
 
-    this.source = 'drive'; // 'drive' | 'local'
+    this.source = 'drive';
     this.selected = null;  // { name, mimeType, size, getBytes: async()=>Uint8Array }
     this.isProcessing = false;
 
@@ -60,21 +50,26 @@ class ChatTranscriber {
     this.oauthToken = '';
     this.tokenClient = null;
 
+    // Drive folder pinning
+    this.pinnedFolderId = '';
+    this.pinnedFolderName = '';
+
+    // Picker callback mode
+    this.pickerMode = 'file'; // 'file' | 'folder'
+
     // ===== Constants (User provided) =====
     this.GOOGLE_CLIENT_ID = '478200222114-ronuhiecjrc0lp9t1b6nnqod7cji46o3.apps.googleusercontent.com';
     this.GOOGLE_API_KEY = 'AIzaSyB6YPsmEy62ltuh1aqZX6Z5Hjx0P9mt0Lw';
     this.DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.readonly';
 
     // ===== Gemini file strategy =====
-    // Inline (base64) increases size; use Files API beyond a safety threshold
-    this.INLINE_MAX_BYTES = 18 * 1024 * 1024; // ~18MB safety margin
-    this.FORCE_FILES_API = false; // set true to always use Files API
+    this.INLINE_MAX_BYTES = 18 * 1024 * 1024;
+    this.FORCE_FILES_API = false;
 
     this.init();
   }
 
   init() {
-    // Restore saved settings
     const savedKey = localStorage.getItem('gemini_api_key');
     if (savedKey) {
       this.apiKey = savedKey;
@@ -91,19 +86,26 @@ class ChatTranscriber {
     const savedModel = localStorage.getItem('gemini_model');
     if (savedModel) this.modelSelect.value = savedModel;
 
-    // Wire events
+    const savedFolderId = localStorage.getItem('drive_pinned_folder_id') || '';
+    const savedFolderName = localStorage.getItem('drive_pinned_folder_name') || '';
+    if (savedFolderId) {
+      this.pinnedFolderId = savedFolderId;
+      this.pinnedFolderName = savedFolderName;
+    }
+
+    // Events
     this.apiKeyInput.addEventListener('input', () => this.onApiKeyInput());
     this.toggleApiKeyBtn.addEventListener('click', () => this.toggleApiKeyVisibility());
     this.saveApiKeyBtn.addEventListener('click', () => this.saveApiKey());
     this.apiKeyFile.addEventListener('change', (e) => this.loadApiKeyFile(e));
 
-    this.speakerCountInput.addEventListener('input', () => this.onSpeakerCountChanged());
+    // iPhone対策：selectは change が自然
+    this.speakerCountInput.addEventListener('change', () => this.onSpeakerCountChanged());
     this.modelSelect.addEventListener('change', () => this.onModelChanged());
 
     this.tabDrive.addEventListener('click', () => this.setSource('drive'));
     this.tabLocal.addEventListener('click', () => this.setSource('local'));
 
-    // Local file events
     if (this.dropzone) {
       this.dropzone.addEventListener('click', () => this.audioFileInput.click());
       this.dropzone.addEventListener('dragover', (e) => this.onDragOver(e));
@@ -112,24 +114,22 @@ class ChatTranscriber {
     }
     this.audioFileInput.addEventListener('change', (e) => this.onFileSelect(e));
 
-    // Drive events
     this.driveConnectBtn.addEventListener('click', () => this.connectDrive());
-    this.drivePickBtn.addEventListener('click', () => this.openDrivePicker());
+    this.drivePickFolderBtn.addEventListener('click', () => this.openDriveFolderPicker());
+    this.drivePickBtn.addEventListener('click', () => this.openDriveFilePicker());
+    this.driveClearFolderBtn.addEventListener('click', () => this.clearPinnedFolder());
 
-    // Run
     this.transcribeBtn.addEventListener('click', () => this.startTranscription());
 
-    // Results actions
     this.copyJsonBtn.addEventListener('click', () => this.copyJson());
     this.downloadJsonBtn.addEventListener('click', () => this.downloadJson());
 
-    // Load Picker API
     this.loadPicker();
-
-    // Initialize
     this.onSpeakerCountChanged();
     this.onModelChanged();
     this.setSource('drive');
+
+    this.renderPinnedFolder();
     this.updateTranscribeButton();
   }
 
@@ -178,7 +178,7 @@ class ChatTranscriber {
       this.updateApiKeyStatus(true, 'ファイルから読み込み完了');
       this.updateTranscribeButton();
     } catch (err) {
-      console.error('APIキーファイル読み込みエラー:', err);
+      console.error(err);
       this.updateApiKeyStatus(false, '読み込み失敗');
     }
   }
@@ -266,6 +266,18 @@ class ChatTranscriber {
     return /\.(mp3|wav|m4a|webm|ogg|mp4|flac)$/i.test(name);
   }
 
+  guessMimeTypeFromName(name) {
+    const lower = (name || '').toLowerCase();
+    if (lower.endsWith('.mp3')) return 'audio/mpeg';
+    if (lower.endsWith('.wav')) return 'audio/wav';
+    if (lower.endsWith('.m4a')) return 'audio/mp4';
+    if (lower.endsWith('.flac')) return 'audio/flac';
+    if (lower.endsWith('.ogg')) return 'audio/ogg';
+    if (lower.endsWith('.webm')) return 'audio/webm';
+    if (lower.endsWith('.mp4')) return 'video/mp4';
+    return 'application/octet-stream';
+  }
+
   // ===== Google Drive Picker =====
   loadPicker() {
     if (!window.gapi) return;
@@ -286,6 +298,7 @@ class ChatTranscriber {
           this.oauthToken = resp.access_token;
           this.updateDriveStatus(true, '✓ 接続済み');
           this.drivePickBtn.disabled = false;
+          this.drivePickFolderBtn.disabled = false;
           this.updateTranscribeButton();
         } else {
           this.updateDriveStatus(false, '認可失敗');
@@ -307,7 +320,25 @@ class ChatTranscriber {
     }
   }
 
-  openDrivePicker() {
+  clearPinnedFolder() {
+    this.pinnedFolderId = '';
+    this.pinnedFolderName = '';
+    localStorage.removeItem('drive_pinned_folder_id');
+    localStorage.removeItem('drive_pinned_folder_name');
+    this.renderPinnedFolder();
+  }
+
+  renderPinnedFolder() {
+    if (!this.driveFolderLabel) return;
+    if (this.pinnedFolderId) {
+      const name = this.pinnedFolderName || this.pinnedFolderId;
+      this.driveFolderLabel.textContent = name;
+    } else {
+      this.driveFolderLabel.textContent = '（未選択：マイドライブ全体）';
+    }
+  }
+
+  openDriveFolderPicker() {
     if (!this.oauthToken) {
       alert('先に Google に接続してください');
       return;
@@ -317,12 +348,59 @@ class ChatTranscriber {
       return;
     }
 
-    const view = new window.google.picker.DocsView(window.google.picker.ViewId.DOCS)
-      .setIncludeFolders(false)
-      .setSelectFolderEnabled(false);
+    this.pickerMode = 'folder';
+
+    // フォルダのみを表示・選択可能にする
+    const folderView = new window.google.picker.DocsView()
+      .setIncludeFolders(true)
+      .setSelectFolderEnabled(true)
+      .setMimeTypes('application/vnd.google-apps.folder');
 
     const picker = new window.google.picker.PickerBuilder()
-      .addView(view)
+      .addView(folderView)
+      .setOAuthToken(this.oauthToken)
+      .setDeveloperKey(this.GOOGLE_API_KEY)
+      .setCallback((data) => this.onPicked(data))
+      .build();
+
+    picker.setVisible(true);
+  }
+
+  openDriveFilePicker() {
+    if (!this.oauthToken) {
+      alert('先に Google に接続してください');
+      return;
+    }
+    if (!window.google || !window.google.picker) {
+      alert('Picker の読み込みを待ってから再試行してください');
+      return;
+    }
+
+    this.pickerMode = 'file';
+
+    // 音声/動画に寄せる（全部のaudio/*を完全には指定できないので主要MIMEを列挙）
+    const mediaMimeTypes = [
+      'audio/mpeg', 'audio/mp4', 'audio/wav', 'audio/x-wav', 'audio/flac', 'audio/ogg', 'audio/webm',
+      'video/mp4', 'video/quicktime', 'video/webm'
+    ].join(',');
+
+    const fileView = new window.google.picker.DocsView(window.google.picker.ViewId.DOCS)
+      .setIncludeFolders(false)
+      .setSelectFolderEnabled(false)
+      .setMimeTypes(mediaMimeTypes);
+
+    // フォルダ固定があれば、その配下を初期表示（重要：setParent） :contentReference[oaicite:3]{index=3}
+    if (this.pinnedFolderId) {
+      fileView.setParent(this.pinnedFolderId);
+    }
+
+    // 追加：最近使った を出す（タブが増えるので好み次第）
+    // WARNING: Google docs上 “deprecated” 表記があるため、環境によっては非推奨。必要なら削除。:contentReference[oaicite:4]{index=4}
+    const recentView = new window.google.picker.View(window.google.picker.ViewId.RECENTLY_PICKED);
+
+    const picker = new window.google.picker.PickerBuilder()
+      .addView(fileView)
+      .addView(recentView)
       .setOAuthToken(this.oauthToken)
       .setDeveloperKey(this.GOOGLE_API_KEY)
       .setCallback((data) => this.onPicked(data))
@@ -332,11 +410,25 @@ class ChatTranscriber {
   }
 
   async onPicked(data) {
-    if (data.action !== window.google.picker.Action.PICKED) return;
+    const action = data.action;
+    if (action !== window.google.picker.Action.PICKED) return;
 
     const doc = data.docs?.[0];
     if (!doc) return;
 
+    if (this.pickerMode === 'folder') {
+      // フォルダ固定
+      this.pinnedFolderId = doc.id;
+      this.pinnedFolderName = doc.name || doc.id;
+
+      localStorage.setItem('drive_pinned_folder_id', this.pinnedFolderId);
+      localStorage.setItem('drive_pinned_folder_name', this.pinnedFolderName);
+
+      this.renderPinnedFolder();
+      return;
+    }
+
+    // file pick
     const fileId = doc.id;
     const name = doc.name || 'drive_file';
     const mimeType = doc.mimeType || this.guessMimeTypeFromName(name);
@@ -357,18 +449,6 @@ class ChatTranscriber {
 
     this.renderFileList();
     this.updateTranscribeButton();
-  }
-
-  guessMimeTypeFromName(name) {
-    const lower = (name || '').toLowerCase();
-    if (lower.endsWith('.mp3')) return 'audio/mpeg';
-    if (lower.endsWith('.wav')) return 'audio/wav';
-    if (lower.endsWith('.m4a')) return 'audio/mp4';
-    if (lower.endsWith('.flac')) return 'audio/flac';
-    if (lower.endsWith('.ogg')) return 'audio/ogg';
-    if (lower.endsWith('.webm')) return 'audio/webm';
-    if (lower.endsWith('.mp4')) return 'video/mp4';
-    return 'application/octet-stream';
   }
 
   async downloadDriveFileBytes(fileId) {
@@ -445,21 +525,18 @@ class ChatTranscriber {
     this.downloadJsonBtn.disabled = true;
 
     try {
-      // 1) Get bytes
       const bytes = await this.selected.getBytes();
       const numBytes = bytes.byteLength || bytes.length || 0;
       if (!numBytes) throw new Error('ファイルが空です（0 bytes）');
 
       this.progressFill.style.width = '20%';
 
-      // 2) Decide upload strategy
       const useFilesApi = this.FORCE_FILES_API || (numBytes > this.INLINE_MAX_BYTES);
       const prompt = this.buildPrompt(this.speakerCount);
 
       let jsonText;
 
       if (useFilesApi) {
-        // ===== Files API path =====
         this.progressText.textContent = 'Gemini Files API にアップロード中...';
         const uploaded = await this.uploadToGeminiFilesApiResumable({
           bytes,
@@ -472,7 +549,6 @@ class ChatTranscriber {
 
         jsonText = await this.callGeminiWithFileUri(prompt, uploaded.uri, uploaded.mimeType);
       } else {
-        // ===== Inline path (small files only) =====
         this.progressText.textContent = 'Gemini へ送信準備中（inline）...';
         const base64 = this.uint8ToBase64(bytes);
         if (!base64) throw new Error('inlineData が空です（base64 empty）');
@@ -527,7 +603,8 @@ class ChatTranscriber {
       '{',
       `  "meta": { "language": "ja", "speakerCount": ${speakerCount} },`,
       '  "speakers": [',
-      '    { "id": "S1", "label": "話者1" }',
+      '    { "id": "S1", "label": "話者1" },',
+      '    { "id": "S2", "label": "話者2" }',
       '  ],',
       '  "messages": [',
       '    { "seq": 1, "speakerId": "S1", "text": "発話テキスト" }',
@@ -541,7 +618,6 @@ class ChatTranscriber {
     ].join('\n');
   }
 
-  // ===== Gemini: Inline (small files) =====
   async callGeminiInline(prompt, mimeType, base64Data) {
     const endpoint =
       `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(this.model)}:generateContent`;
@@ -576,12 +652,10 @@ class ChatTranscriber {
     return text;
   }
 
-  // ===== Gemini: Files API (large files) =====
   async uploadToGeminiFilesApiResumable({ bytes, mimeType, displayName }) {
     const numBytes = bytes.byteLength || bytes.length || 0;
     if (!numBytes) throw new Error('アップロード対象が空です（0 bytes）');
 
-    // 1) start (get upload URL)
     const startUrl = 'https://generativelanguage.googleapis.com/upload/v1beta/files';
 
     const startRes = await fetch(startUrl, {
@@ -612,7 +686,6 @@ class ChatTranscriber {
       throw new Error('Files API: upload URL を取得できませんでした（X-Goog-Upload-URL が空）');
     }
 
-    // 2) upload + finalize
     const blob = new Blob([bytes], { type: mimeType });
 
     const uploadRes = await fetch(uploadUrl, {
@@ -636,7 +709,6 @@ class ChatTranscriber {
       throw new Error('Files API upload: file.uri / file.name を取得できませんでした');
     }
 
-    // Some media can be PROCESSING; best-effort wait for ACTIVE
     if (file.state && String(file.state).toUpperCase() === 'PROCESSING') {
       this.progressText.textContent = 'アップロード後の処理待ち（PROCESSING）...';
       const activeFile = await this.waitForGeminiFileActive(file.name);
@@ -647,7 +719,7 @@ class ChatTranscriber {
   }
 
   async waitForGeminiFileActive(fileName) {
-    const deadline = Date.now() + 120000; // 2 min
+    const deadline = Date.now() + 120000;
     const url = `https://generativelanguage.googleapis.com/v1beta/files/${encodeURIComponent(fileName)}`;
 
     while (Date.now() < deadline) {
@@ -666,7 +738,6 @@ class ChatTranscriber {
       await this.sleep(2000);
     }
 
-    // final best-effort fetch
     const res = await fetch(url, {
       method: 'GET',
       headers: { 'x-goog-api-key': this.apiKey },
@@ -713,26 +784,18 @@ class ChatTranscriber {
     return text;
   }
 
-  // ===== JSON handling =====
   safeParseJson(text) {
     if (!text) return null;
     let s = String(text).trim();
-
-    // Remove common wrappers if model violates "JSON only"
     s = s.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '').trim();
 
-    // Extract first {...} block if there is leading/trailing noise
     const firstBrace = s.indexOf('{');
     const lastBrace = s.lastIndexOf('}');
     if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
       s = s.slice(firstBrace, lastBrace + 1);
     }
 
-    try {
-      return JSON.parse(s);
-    } catch {
-      return null;
-    }
+    try { return JSON.parse(s); } catch { return null; }
   }
 
   renderChat(result) {
@@ -745,9 +808,7 @@ class ChatTranscriber {
       return;
     }
 
-    // UI: S1 as "self" bubble (right side)
     const selfId = 'S1';
-
     this.chatThread.innerHTML = msgs.map(m => {
       const speakerId = m.speakerId || 'S?';
       const label = speakers.get(speakerId) || speakerId;
@@ -770,14 +831,12 @@ class ChatTranscriber {
     }).join('');
   }
 
-  // ===== Utils =====
   escapeHtml(text) {
     const div = document.createElement('div');
     div.textContent = text ?? '';
     return div.innerHTML;
   }
 
-  // NOTE: For small files only. Large files should use Files API.
   uint8ToBase64(bytes) {
     const CHUNK_SIZE = 0x8000;
     let binary = '';

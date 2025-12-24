@@ -11,12 +11,7 @@
   <meta name="theme-color" content="#0a0a0f" />
   <title>音声文字起こし | Chat Transcriber</title>
 
-  <!--
-    GitHub Pages (project pages) で CSS が外れる場合の対策:
-    - 絶対パス /web_mojiokoshi/ を使う
-    - styles.css / style.css の両方を読みに行く（片方が存在すればOK）
-    - ?v= でキャッシュバスター
-  -->
+  <!-- GitHub Pages対策（絶対パス + キャッシュバスター + styles/style両対応） -->
   <link rel="stylesheet" href="/web_mojiokoshi/styles.css?v=20251224" />
   <link rel="stylesheet" href="/web_mojiokoshi/style.css?v=20251224" />
 
@@ -44,10 +39,22 @@
         <div class="grid-2">
           <div>
             <label class="field-label">話者人数</label>
-            <div class="inline-field">
-              <input id="speakerCount" class="text-input" type="number" min="1" max="10" step="1" value="2" />
-              <span class="field-note">1〜10</span>
-            </div>
+
+            <!-- iPhone対策：number入力 → プルダウン -->
+            <select id="speakerCount" class="select-input">
+              <option value="1">1</option>
+              <option value="2" selected>2</option>
+              <option value="3">3</option>
+              <option value="4">4</option>
+              <option value="5">5</option>
+              <option value="6">6</option>
+              <option value="7">7</option>
+              <option value="8">8</option>
+              <option value="9">9</option>
+              <option value="10">10</option>
+            </select>
+
+            <div class="field-note-block">1〜10</div>
           </div>
 
           <div>
@@ -55,7 +62,6 @@
             <select id="modelSelect" class="select-input">
               <option value="gemini-3-flash-preview">gemini-3-flash-preview</option>
               <option value="gemini-3-pro-preview">gemini-3-pro-preview</option>
-
               <option value="gemini-2.0-flash-exp">gemini-2.0-flash-exp</option>
               <option value="gemini-2.0-flash">gemini-2.0-flash</option>
               <option value="gemini-1.5-pro">gemini-1.5-pro</option>
@@ -94,11 +100,25 @@
         <div id="drivePanel" class="panel">
           <div class="row">
             <button id="driveConnectBtn" class="btn-primary">Google に接続</button>
-            <button id="drivePickBtn" class="btn-secondary" disabled>Drive から選択</button>
             <span id="driveStatus" class="status-badge"></span>
           </div>
+
+          <div class="divider compact"></div>
+
+          <!-- 改善：フォルダ固定 → そのフォルダ内から音声を選択 -->
+          <div class="row">
+            <button id="drivePickFolderBtn" class="btn-secondary" disabled>フォルダを選ぶ</button>
+            <button id="drivePickBtn" class="btn-secondary" disabled>このフォルダから音声を選択</button>
+          </div>
+
+          <div class="drive-folder-line">
+            <span class="field-note">選択中フォルダ:</span>
+            <span id="driveFolderLabel" class="mono-pill">（未選択：マイドライブ全体）</span>
+            <button id="driveClearFolderBtn" class="btn-link" type="button">フォルダ固定を解除</button>
+          </div>
+
           <p class="help-text">
-            Drive から選択した音声はブラウザで取得し、そのまま Gemini API に送信します（サーバ側アップロードは行いません）。
+            先にフォルダを固定すると、そのフォルダ配下だけを表示して音声を選べます（探す手間を削減）。
           </p>
         </div>
 
@@ -161,12 +181,9 @@
     </footer>
   </div>
 
-  <!-- Google Identity Services (OAuth token) -->
   <script src="https://accounts.google.com/gsi/client" async defer></script>
-  <!-- Google API loader (Picker) -->
   <script src="https://apis.google.com/js/api.js"></script>
 
-  <!-- app.js も絶対パス + キャッシュバスター -->
   <script src="/web_mojiokoshi/app.js?v=20251224"></script>
 </body>
 </html>
