@@ -312,6 +312,17 @@ body::before{
   border-color:rgba(16,185,129,0.32);
 }
 
+/* 追加：エラー表示（JSが挿入する） */
+.result-error{
+  margin-top:var(--spacing-sm);
+  padding:0.75rem 1rem;
+  border-radius:var(--radius-md);
+  border:1px solid rgba(239,68,68,0.35);
+  background:rgba(239,68,68,0.12);
+  color:#ffd0d0;
+  line-height:1.6;
+}
+
 .raw-json{
   margin-top:var(--spacing-md);
   border:1px solid var(--color-border);

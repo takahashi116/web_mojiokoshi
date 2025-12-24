@@ -10,7 +10,16 @@
   <meta name="apple-mobile-web-app-title" content="Transcriber" />
   <meta name="theme-color" content="#0a0a0f" />
   <title>音声文字起こし | Chat Transcriber</title>
-  <link rel="stylesheet" href="styles.css" />
+
+  <!--
+    GitHub Pages (project pages) で CSS が外れる場合の対策:
+    - 絶対パス /web_mojiokoshi/ を使う
+    - styles.css / style.css の両方を読みに行く（片方が存在すればOK）
+    - ?v= でキャッシュバスター
+  -->
+  <link rel="stylesheet" href="/web_mojiokoshi/styles.css?v=20251224" />
+  <link rel="stylesheet" href="/web_mojiokoshi/style.css?v=20251224" />
+
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
@@ -157,6 +166,7 @@
   <!-- Google API loader (Picker) -->
   <script src="https://apis.google.com/js/api.js"></script>
 
-  <script src="app.js"></script>
+  <!-- app.js も絶対パス + キャッシュバスター -->
+  <script src="/web_mojiokoshi/app.js?v=20251224"></script>
 </body>
 </html>
