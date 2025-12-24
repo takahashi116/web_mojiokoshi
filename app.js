@@ -54,6 +54,9 @@ class GeminiTranscriber {
     this.tokenClient = null;
     this.pickerReady = false;
 
+    // Wake Lock（iOS/Safari対策）
+    this.wakeLock = null;
+
     this.init();
   }
 
@@ -385,6 +388,56 @@ class GeminiTranscriber {
     return res.blob();
   }
 
+  // ===== Wake Lock（画面スリープ防止）=====
+
+  async acquireWakeLock() {
+    // Wake Lock APIが使えるか確認
+    if (!('wakeLock' in navigator)) {
+      console.log('Wake Lock API not supported');
+      return false;
+    }
+
+    try {
+      this.wakeLock = await navigator.wakeLock.request('screen');
+      console.log('Wake Lock acquired');
+
+      // ページが非表示になったら再取得を試みる
+      this.wakeLock.addEventListener('release', () => {
+        console.log('Wake Lock released');
+      });
+
+      // visibilitychangeでWake Lockを再取得
+      document.addEventListener('visibilitychange', this.handleVisibilityChange.bind(this));
+
+      return true;
+    } catch (err) {
+      console.log('Wake Lock failed:', err);
+      return false;
+    }
+  }
+
+  async handleVisibilityChange() {
+    if (this.isProcessing && document.visibilityState === 'visible') {
+      // 処理中にページが再表示されたらWake Lockを再取得
+      try {
+        if (!this.wakeLock || this.wakeLock.released) {
+          this.wakeLock = await navigator.wakeLock.request('screen');
+          console.log('Wake Lock re-acquired');
+        }
+      } catch (err) {
+        console.log('Wake Lock re-acquire failed:', err);
+      }
+    }
+  }
+
+  releaseWakeLock() {
+    if (this.wakeLock) {
+      this.wakeLock.release();
+      this.wakeLock = null;
+    }
+    document.removeEventListener('visibilitychange', this.handleVisibilityChange.bind(this));
+  }
+
   // ===== Local file =====
 
   onDragOver(e) { e.preventDefault(); this.dropzone.classList.add('dragover'); }
@@ -476,8 +529,27 @@ class GeminiTranscriber {
       return;
     }
 
+    // 大きなファイルの警告（iOS向け）
+    const largeFiles = this.files.filter(f => f.size > 50 * 1024 * 1024); // 50MB以上
+    if (largeFiles.length > 0 && this.isIOS()) {
+      const proceed = confirm(
+        `⚠️ 大きなファイル（${largeFiles.map(f => f.name).join(', ')}）があります。\n\n` +
+        `iPhoneでは処理中に画面がスリープしたり、他のアプリに切り替えると処理が中断される場合があります。\n\n` +
+        `処理中は画面をアクティブに保ち、他のアプリに切り替えないでください。\n\n` +
+        `続行しますか？`
+      );
+      if (!proceed) return;
+    }
+
     this.isProcessing = true;
     this.updateTranscribeButton();
+
+    // Wake Lock取得（画面スリープ防止）
+    const wakeLockAcquired = await this.acquireWakeLock();
+    if (!wakeLockAcquired && this.isIOS()) {
+      // Wake Lockが使えない場合は追加の警告を表示
+      this.showIOSWarning();
+    }
 
     this.progressSection.style.display = 'block';
     this.resultsSection.style.display = 'block';
@@ -485,22 +557,74 @@ class GeminiTranscriber {
 
     const total = this.files.length;
 
-    for (let i = 0; i < total; i++) {
-      const f = this.files[i];
-      const pct = Math.floor((i / total) * 100);
-      this.progressFill.style.width = `${pct}%`;
-      this.progressText.textContent = `処理中: ${f.name} (${i + 1}/${total})`;
+    try {
+      for (let i = 0; i < total; i++) {
+        const f = this.files[i];
+        const pct = Math.floor((i / total) * 100);
+        this.progressFill.style.width = `${pct}%`;
+        this.progressText.textContent = `処理中: ${f.name} (${i + 1}/${total})`;
 
-      await this.transcribeOne(f, i);
+        await this.transcribeOne(f, i);
+      }
+
+      this.progressFill.style.width = '100%';
+      this.progressText.textContent = `完了！ ${total}ファイルを処理しました`;
+    } finally {
+      // 処理完了時にWake Lock解放
+      this.releaseWakeLock();
+
+      this.isProcessing = false;
+      this.files = [];
+      this.renderFileList();
+      this.updateTranscribeButton();
     }
+  }
 
-    this.progressFill.style.width = '100%';
-    this.progressText.textContent = `完了！ ${total}ファイルを処理しました`;
+  isIOS() {
+    return /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+      (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  }
 
-    this.isProcessing = false;
-    this.files = [];
-    this.renderFileList();
-    this.updateTranscribeButton();
+  showIOSWarning() {
+    // iOS用の警告バナーを表示
+    const warning = document.createElement('div');
+    warning.id = 'iosWarning';
+    warning.style.cssText = `
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      background: linear-gradient(135deg, #f59e0b, #d97706);
+      color: #000;
+      padding: 12px 16px;
+      font-size: 14px;
+      font-weight: 600;
+      text-align: center;
+      z-index: 9999;
+      box-shadow: 0 2px 10px rgba(0,0,0,0.3);
+    `;
+    warning.innerHTML = `
+      ⚠️ 処理中は画面をアクティブに保ってください
+      <button onclick="this.parentElement.remove()" style="
+        margin-left: 12px;
+        background: rgba(0,0,0,0.2);
+        border: none;
+        color: #000;
+        padding: 4px 10px;
+        border-radius: 6px;
+        cursor: pointer;
+        font-weight: 600;
+      ">閉じる</button>
+    `;
+    document.body.prepend(warning);
+
+    // 処理完了後に自動で消す
+    const checkProcessing = setInterval(() => {
+      if (!this.isProcessing) {
+        warning.remove();
+        clearInterval(checkProcessing);
+      }
+    }, 1000);
   }
 
   async transcribeOne(fileItem, index) {
@@ -541,8 +665,10 @@ class GeminiTranscriber {
       const blob = await fileItem.getBlob();
       const mimeType = fileItem.mimeType || blob.type || 'application/octet-stream';
 
-      statusEl.textContent = 'アップロード中...';
-      const uploaded = await this.uploadFileToGemini(blob, fileItem.name);
+      statusEl.textContent = 'アップロード中... 0%';
+      const uploaded = await this.uploadFileToGemini(blob, fileItem.name, (percent, loaded, total) => {
+        statusEl.textContent = `アップロード中... ${percent}% (${this.formatFileSize(loaded)}/${this.formatFileSize(total)})`;
+      });
 
       statusEl.textContent = 'ファイル処理待ち...';
       await this.waitForFileActive(uploaded.name);
@@ -661,27 +787,62 @@ class GeminiTranscriber {
 {"segments":[{"speaker":"話者1","text":"発言内容"},{"speaker":"話者2","text":"発言内容"}]}`;
   }
 
-  async uploadFileToGemini(blob, displayName) {
+  async uploadFileToGemini(blob, displayName, onProgress) {
     const formData = new FormData();
     const file = new File([blob], displayName || 'media', { type: blob.type || 'application/octet-stream' });
     formData.append('file', file);
 
-    const res = await fetch(
-      `https://generativelanguage.googleapis.com/upload/v1beta/files?key=${encodeURIComponent(this.apiKey)}`,
-      { method: 'POST', body: formData }
-    );
+    // XMLHttpRequestを使って進捗を取得
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
 
-    if (!res.ok) {
-      let err;
-      try { err = await res.json(); } catch {}
-      throw new Error(err?.error?.message || `Upload failed: HTTP ${res.status}`);
-    }
+      xhr.upload.addEventListener('progress', (e) => {
+        if (e.lengthComputable && onProgress) {
+          const percent = Math.round((e.loaded / e.total) * 100);
+          onProgress(percent, e.loaded, e.total);
+        }
+      });
 
-    const data = await res.json();
-    const uri = data?.file?.uri;
-    const name = data?.file?.name;
-    if (!uri || !name) throw new Error('Upload response is missing file.uri or file.name');
-    return { uri, name };
+      xhr.addEventListener('load', () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          try {
+            const data = JSON.parse(xhr.responseText);
+            const uri = data?.file?.uri;
+            const name = data?.file?.name;
+            if (!uri || !name) {
+              reject(new Error('Upload response is missing file.uri or file.name'));
+            } else {
+              resolve({ uri, name });
+            }
+          } catch (e) {
+            reject(new Error('Failed to parse upload response'));
+          }
+        } else {
+          let errMsg = `Upload failed: HTTP ${xhr.status}`;
+          try {
+            const errData = JSON.parse(xhr.responseText);
+            if (errData?.error?.message) errMsg = errData.error.message;
+          } catch {}
+          reject(new Error(errMsg));
+        }
+      });
+
+      xhr.addEventListener('error', () => {
+        reject(new Error('Upload failed: Network error'));
+      });
+
+      xhr.addEventListener('abort', () => {
+        reject(new Error('Upload aborted'));
+      });
+
+      xhr.addEventListener('timeout', () => {
+        reject(new Error('Upload timeout'));
+      });
+
+      xhr.open('POST', `https://generativelanguage.googleapis.com/upload/v1beta/files?key=${encodeURIComponent(this.apiKey)}`);
+      xhr.timeout = 600000; // 10分タイムアウト
+      xhr.send(formData);
+    });
   }
 
   async waitForFileActive(fileName) {
