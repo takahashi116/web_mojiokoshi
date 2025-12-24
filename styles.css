@@ -1,4 +1,4 @@
-/* styles.css（元アプリのダーク/Glassに寄せつつ、話者チャット表示＋話者色(最大20)を追加） */
+/* Gemini Transcriber - styles.css */
 
 :root {
   --color-bg: #0a0a0f;
@@ -484,7 +484,12 @@ body::before{
 .result-btn:hover{ background: var(--color-primary); border-color: var(--color-primary); }
 .result-btn:active{ transform: scale(0.95); }
 
-.result-error{ color: var(--color-error); font-size:0.85rem; }
+.result-error{ 
+  color: var(--color-error); 
+  font-size:0.85rem; 
+  white-space: pre-wrap;
+  line-height: 1.6;
+}
 
 .result-tabs{
   display:flex;
@@ -514,9 +519,15 @@ body::before{
   border-radius: var(--radius-md);
   padding: var(--spacing-sm);
   background: rgba(0,0,0,0.12);
-  max-height: 320px;
+  max-height: 450px;
   overflow: auto;
   -webkit-overflow-scrolling: touch;
+}
+
+.no-result {
+  color: var(--color-text-muted);
+  text-align: center;
+  padding: var(--spacing-md);
 }
 
 .msg{
@@ -529,7 +540,7 @@ body::before{
   width: 44px;
   height: 44px;
   border-radius: 14px;
-  border: 1px solid var(--color-border);
+  border: 2px solid var(--color-border);
   background: rgba(255,255,255,0.04);
   display:flex;
   align-items:center;
@@ -549,6 +560,7 @@ body::before{
   border-radius: 14px;
   padding: 10px 12px;
   max-width: calc(100% - 44px - 10px);
+  flex: 1;
 }
 
 .msg .meta{
@@ -567,33 +579,53 @@ body::before{
 }
 
 /* speaker color mapping: class "spk-1".."spk-20" */
-.msg.spk-1  .avatar, .msg.spk-1  .bubble{ border-color: color-mix(in srgb, var(--sp1) 55%, transparent); }
-.msg.spk-2  .avatar, .msg.spk-2  .bubble{ border-color: color-mix(in srgb, var(--sp2) 55%, transparent); }
-.msg.spk-3  .avatar, .msg.spk-3  .bubble{ border-color: color-mix(in srgb, var(--sp3) 55%, transparent); }
-.msg.spk-4  .avatar, .msg.spk-4  .bubble{ border-color: color-mix(in srgb, var(--sp4) 55%, transparent); }
-.msg.spk-5  .avatar, .msg.spk-5  .bubble{ border-color: color-mix(in srgb, var(--sp5) 55%, transparent); }
-.msg.spk-6  .avatar, .msg.spk-6  .bubble{ border-color: color-mix(in srgb, var(--sp6) 55%, transparent); }
-.msg.spk-7  .avatar, .msg.spk-7  .bubble{ border-color: color-mix(in srgb, var(--sp7) 55%, transparent); }
-.msg.spk-8  .avatar, .msg.spk-8  .bubble{ border-color: color-mix(in srgb, var(--sp8) 55%, transparent); }
-.msg.spk-9  .avatar, .msg.spk-9  .bubble{ border-color: color-mix(in srgb, var(--sp9) 55%, transparent); }
-.msg.spk-10 .avatar, .msg.spk-10 .bubble{ border-color: color-mix(in srgb, var(--sp10)55%, transparent); }
-.msg.spk-11 .avatar, .msg.spk-11 .bubble{ border-color: color-mix(in srgb, var(--sp11)55%, transparent); }
-.msg.spk-12 .avatar, .msg.spk-12 .bubble{ border-color: color-mix(in srgb, var(--sp12)55%, transparent); }
-.msg.spk-13 .avatar, .msg.spk-13 .bubble{ border-color: color-mix(in srgb, var(--sp13)55%, transparent); }
-.msg.spk-14 .avatar, .msg.spk-14 .bubble{ border-color: color-mix(in srgb, var(--sp14)55%, transparent); }
-.msg.spk-15 .avatar, .msg.spk-15 .bubble{ border-color: color-mix(in srgb, var(--sp15)55%, transparent); }
-.msg.spk-16 .avatar, .msg.spk-16 .bubble{ border-color: color-mix(in srgb, var(--sp16)55%, transparent); }
-.msg.spk-17 .avatar, .msg.spk-17 .bubble{ border-color: color-mix(in srgb, var(--sp17)55%, transparent); }
-.msg.spk-18 .avatar, .msg.spk-18 .bubble{ border-color: color-mix(in srgb, var(--sp18)55%, transparent); }
-.msg.spk-19 .avatar, .msg.spk-19 .bubble{ border-color: color-mix(in srgb, var(--sp19)55%, transparent); }
-.msg.spk-20 .avatar, .msg.spk-20 .bubble{ border-color: color-mix(in srgb, var(--sp20)55%, transparent); }
+.msg.spk-1  .avatar{ border-color: var(--sp1); background: color-mix(in srgb, var(--sp1) 15%, transparent); }
+.msg.spk-1  .bubble{ border-color: color-mix(in srgb, var(--sp1) 40%, transparent); }
+.msg.spk-2  .avatar{ border-color: var(--sp2); background: color-mix(in srgb, var(--sp2) 15%, transparent); }
+.msg.spk-2  .bubble{ border-color: color-mix(in srgb, var(--sp2) 40%, transparent); }
+.msg.spk-3  .avatar{ border-color: var(--sp3); background: color-mix(in srgb, var(--sp3) 15%, transparent); }
+.msg.spk-3  .bubble{ border-color: color-mix(in srgb, var(--sp3) 40%, transparent); }
+.msg.spk-4  .avatar{ border-color: var(--sp4); background: color-mix(in srgb, var(--sp4) 15%, transparent); }
+.msg.spk-4  .bubble{ border-color: color-mix(in srgb, var(--sp4) 40%, transparent); }
+.msg.spk-5  .avatar{ border-color: var(--sp5); background: color-mix(in srgb, var(--sp5) 15%, transparent); }
+.msg.spk-5  .bubble{ border-color: color-mix(in srgb, var(--sp5) 40%, transparent); }
+.msg.spk-6  .avatar{ border-color: var(--sp6); background: color-mix(in srgb, var(--sp6) 15%, transparent); }
+.msg.spk-6  .bubble{ border-color: color-mix(in srgb, var(--sp6) 40%, transparent); }
+.msg.spk-7  .avatar{ border-color: var(--sp7); background: color-mix(in srgb, var(--sp7) 15%, transparent); }
+.msg.spk-7  .bubble{ border-color: color-mix(in srgb, var(--sp7) 40%, transparent); }
+.msg.spk-8  .avatar{ border-color: var(--sp8); background: color-mix(in srgb, var(--sp8) 15%, transparent); }
+.msg.spk-8  .bubble{ border-color: color-mix(in srgb, var(--sp8) 40%, transparent); }
+.msg.spk-9  .avatar{ border-color: var(--sp9); background: color-mix(in srgb, var(--sp9) 15%, transparent); }
+.msg.spk-9  .bubble{ border-color: color-mix(in srgb, var(--sp9) 40%, transparent); }
+.msg.spk-10 .avatar{ border-color: var(--sp10); background: color-mix(in srgb, var(--sp10) 15%, transparent); }
+.msg.spk-10 .bubble{ border-color: color-mix(in srgb, var(--sp10) 40%, transparent); }
+.msg.spk-11 .avatar{ border-color: var(--sp11); background: color-mix(in srgb, var(--sp11) 15%, transparent); }
+.msg.spk-11 .bubble{ border-color: color-mix(in srgb, var(--sp11) 40%, transparent); }
+.msg.spk-12 .avatar{ border-color: var(--sp12); background: color-mix(in srgb, var(--sp12) 15%, transparent); }
+.msg.spk-12 .bubble{ border-color: color-mix(in srgb, var(--sp12) 40%, transparent); }
+.msg.spk-13 .avatar{ border-color: var(--sp13); background: color-mix(in srgb, var(--sp13) 15%, transparent); }
+.msg.spk-13 .bubble{ border-color: color-mix(in srgb, var(--sp13) 40%, transparent); }
+.msg.spk-14 .avatar{ border-color: var(--sp14); background: color-mix(in srgb, var(--sp14) 15%, transparent); }
+.msg.spk-14 .bubble{ border-color: color-mix(in srgb, var(--sp14) 40%, transparent); }
+.msg.spk-15 .avatar{ border-color: var(--sp15); background: color-mix(in srgb, var(--sp15) 15%, transparent); }
+.msg.spk-15 .bubble{ border-color: color-mix(in srgb, var(--sp15) 40%, transparent); }
+.msg.spk-16 .avatar{ border-color: var(--sp16); background: color-mix(in srgb, var(--sp16) 15%, transparent); }
+.msg.spk-16 .bubble{ border-color: color-mix(in srgb, var(--sp16) 40%, transparent); }
+.msg.spk-17 .avatar{ border-color: var(--sp17); background: color-mix(in srgb, var(--sp17) 15%, transparent); }
+.msg.spk-17 .bubble{ border-color: color-mix(in srgb, var(--sp17) 40%, transparent); }
+.msg.spk-18 .avatar{ border-color: var(--sp18); background: color-mix(in srgb, var(--sp18) 15%, transparent); }
+.msg.spk-18 .bubble{ border-color: color-mix(in srgb, var(--sp18) 40%, transparent); }
+.msg.spk-19 .avatar{ border-color: var(--sp19); background: color-mix(in srgb, var(--sp19) 15%, transparent); }
+.msg.spk-19 .bubble{ border-color: color-mix(in srgb, var(--sp19) 40%, transparent); }
+.msg.spk-20 .avatar{ border-color: var(--sp20); background: color-mix(in srgb, var(--sp20) 15%, transparent); }
+.msg.spk-20 .bubble{ border-color: color-mix(in srgb, var(--sp20) 40%, transparent); }
 
 .json-view{
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   padding: var(--spacing-sm);
   background: rgba(0,0,0,0.15);
-  max-height: 320px;
+  max-height: 450px;
   overflow: auto;
   -webkit-overflow-scrolling: touch;
   color: rgba(255,255,255,0.85);
@@ -601,17 +633,30 @@ body::before{
   line-height: 1.6;
   white-space: pre-wrap;
   word-break: break-word;
+  font-family: 'SF Mono', Consolas, monospace;
 }
 
 .hint-block{
   margin-top: var(--spacing-sm);
   padding: var(--spacing-sm);
-  border: 1px solid rgba(255,255,255,0.08);
+  border: 1px solid rgba(245, 158, 11, 0.3);
   border-radius: var(--radius-md);
-  background: rgba(0,0,0,0.12);
+  background: rgba(245, 158, 11, 0.08);
 }
-.hint-title{ font-size:0.8rem; font-weight:700; color: rgba(255,255,255,0.78); margin-bottom: 0.2rem; }
-.hint-text{ font-size:0.78rem; color: var(--color-text-muted); }
+.hint-title{ 
+  font-size:0.8rem; 
+  font-weight:700; 
+  color: var(--color-warning); 
+  margin-bottom: 0.3rem; 
+}
+.hint-text{ 
+  font-size:0.78rem; 
+  color: var(--color-text-secondary);
+  line-height: 1.5;
+}
+.hint-text strong {
+  color: var(--color-text);
+}
 
 .footer{
   margin-top:auto;

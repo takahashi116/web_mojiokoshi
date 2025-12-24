@@ -1,10 +1,8 @@
-<!-- index.html（仕切り直し：元アプリのデザインに寄せつつ、話者数/モデル/Drive選択を追加。フォルダ固定は無し） -->
 <!DOCTYPE html>
 <html lang="ja">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport"
-        content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
   <meta name="description" content="Gemini APIを使用した音声文字起こしアプリ">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -13,12 +11,11 @@
 
   <title>音声文字起こし | Gemini Transcriber</title>
 
-  <link rel="stylesheet" href="styles.css?v=20251224c">
+  <link rel="stylesheet" href="styles.css">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 
-  <!-- Drive Picker (フォルダ固定は実装しない。選びにくさは将来改善) -->
   <script src="https://accounts.google.com/gsi/client" async defer></script>
   <script src="https://apis.google.com/js/api.js" async defer></script>
 </head>
@@ -50,8 +47,11 @@
           <div class="row-item">
             <label class="mini-label" for="modelSelect">モデル</label>
             <select id="modelSelect" class="select-input">
-              <option value="gemini-3-flash-preview">gemini-3-flash-preview（推奨）</option>
-              <option value="gemini-3-pro">gemini-3-pro</option>
+              <option value="gemini-3-flash-preview" selected>gemini-3-flash-preview（最新・推奨）</option>
+              <option value="gemini-3-pro-preview">gemini-3-pro-preview（最高精度）</option>
+              <option value="gemini-2.5-flash">gemini-2.5-flash（安定版・高速）</option>
+              <option value="gemini-2.5-pro">gemini-2.5-pro（安定版・高精度）</option>
+              <option value="gemini-2.0-flash">gemini-2.0-flash</option>
             </select>
           </div>
 
@@ -97,9 +97,10 @@
         <div id="fileList" class="file-list"></div>
 
         <div class="hint-block">
-          <div class="hint-title">注意</div>
+          <div class="hint-title">💡 ヒント</div>
           <div class="hint-text">
-            「Failed to fetch」はCORS/ネットワークブロック等でも出ます。まずは本仕切り直し版で「resumableアップロード」を避け、安定化を優先します。
+            iPhoneで処理中は<strong>このアプリを開いたまま</strong>にしてください。<br>
+            別アプリに切り替えると接続が切れる場合があります。
           </div>
         </div>
       </section>
@@ -133,6 +134,6 @@
     </footer>
   </div>
 
-  <script src="app.js?v=20251224c"></script>
+  <script src="app.js"></script>
 </body>
 </html>

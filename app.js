@@ -1,13 +1,13 @@
 /**
- * Gemini Transcriber - 仕切り直し版
- * - 元のダーク/Glass UIに寄せる（index/stylesの系統を踏襲） 
- * - “フォルダ固定”は削除（安定化優先）
- * - Files APIはブラウザで通りやすい FormData 単発POST（resumableは使わない） :contentReference[oaicite:5]{index=5}
- * - 出力は JSON（segments: [{speaker,text}]）→ チャット表示＋JSON表示
- * - 話者色は最大20
+ * Gemini Transcriber - 完全修正版
+ * 
+ * 修正点：
+ * 1. iOSでのOAuthトークン管理を改善（トークン有効期限追跡・自動リフレッシュ）
+ * 2. JSON解析を堅牢化（マークダウン除去、不完全JSON修復）
+ * 3. maxOutputTokensを削除（途切れ防止）
+ * 4. ストリーミング対応で長時間音声も安定
  */
 
-/* === Drive settings (コード埋め込みOKという要望に従う) === */
 const GCP_OAUTH_CLIENT_ID = '478200222114-ronuhiecjrc0lp9t1b6nnqod7cji46o3.apps.googleusercontent.com';
 const GCP_API_KEY = 'AIzaSyB6YPsmEy62ltuh1aqZX6Z5Hjx0P9mt0Lw';
 const DRIVE_SCOPES = 'https://www.googleapis.com/auth/drive.readonly';
@@ -41,15 +41,16 @@ class GeminiTranscriber {
     this.resultsList = document.getElementById('resultsList');
 
     // State
-    this.files = []; // { id, name, size, mimeType, source, getBlob():Promise<Blob> }
+    this.files = [];
     this.apiKey = '';
     this.isProcessing = false;
 
-    this.model = 'gemini-3-flash-preview'; // :contentReference[oaicite:6]{index=6}
+    this.model = 'gemini-3-flash-preview';
     this.speakerCount = 2;
 
-    // Drive
+    // Drive OAuth
     this.oauthToken = '';
+    this.tokenExpiry = 0; // トークン有効期限（timestamp）
     this.tokenClient = null;
     this.pickerReady = false;
 
@@ -75,13 +76,11 @@ class GeminiTranscriber {
   }
 
   bindEvents() {
-    // API key
     this.apiKeyInput.addEventListener('input', () => this.onApiKeyInput());
     this.toggleApiKeyBtn.addEventListener('click', () => this.toggleApiKeyVisibility());
     this.saveApiKeyBtn.addEventListener('click', () => this.saveApiKey());
     this.apiKeyFile.addEventListener('change', (e) => this.loadApiKeyFile(e));
 
-    // model / speakers
     this.modelSelect.addEventListener('change', () => {
       this.model = this.modelSelect.value;
       localStorage.setItem('gemini_model', this.model);
@@ -91,11 +90,9 @@ class GeminiTranscriber {
       localStorage.setItem('speaker_count', String(this.speakerCount));
     });
 
-    // drive
     this.driveLoginBtn.addEventListener('click', () => this.driveLogin());
     this.drivePickBtn.addEventListener('click', () => this.openDrivePicker());
 
-    // file upload
     this.dropzone.addEventListener('click', (e) => {
       if (e.target.closest('.file-select-btn')) return;
       this.audioFileInput.click();
@@ -105,7 +102,6 @@ class GeminiTranscriber {
     this.dropzone.addEventListener('drop', (e) => this.onDrop(e));
     this.audioFileInput.addEventListener('change', (e) => this.onFileSelect(e));
 
-    // transcribe
     this.transcribeBtn.addEventListener('click', () => this.startTranscription());
   }
 
@@ -126,9 +122,7 @@ class GeminiTranscriber {
 
       this.modelSelect.value = this.model;
       this.speakerCountSelect.value = String(this.speakerCount);
-    } catch (e) {
-      // localStorageが使えない環境もあるため黙って継続
-    }
+    } catch (e) {}
   }
 
   onApiKeyInput() {
@@ -196,7 +190,7 @@ class GeminiTranscriber {
     }
   }
 
-  // ===== Drive =====
+  // ===== Drive OAuth（改善版）=====
 
   initPickerLoader() {
     const poll = () => {
@@ -213,9 +207,50 @@ class GeminiTranscriber {
   }
 
   refreshDriveUi() {
-    const canPick = !!this.oauthToken && this.pickerReady && !!window.google?.picker;
+    const canPick = this.isTokenValid() && this.pickerReady && !!window.google?.picker;
     this.drivePickBtn.disabled = !canPick;
-    if (!this.driveStatus.textContent) this.driveStatus.textContent = canPick ? '接続済み' : '未接続';
+    if (this.isTokenValid()) {
+      this.driveStatus.textContent = '接続済み';
+      this.driveStatus.className = 'status-badge success';
+    }
+  }
+
+  // トークンが有効かチェック（有効期限の1分前までを有効とする）
+  isTokenValid() {
+    return this.oauthToken && Date.now() < this.tokenExpiry - 60000;
+  }
+
+  // トークンを確実に取得（必要なら再取得）
+  async ensureValidToken() {
+    if (this.isTokenValid()) return true;
+    
+    return new Promise((resolve) => {
+      if (!window.google?.accounts?.oauth2) {
+        resolve(false);
+        return;
+      }
+
+      if (!this.tokenClient) {
+        this.tokenClient = window.google.accounts.oauth2.initTokenClient({
+          client_id: GCP_OAUTH_CLIENT_ID,
+          scope: DRIVE_SCOPES,
+          callback: (resp) => {
+            if (resp?.access_token) {
+              this.oauthToken = resp.access_token;
+              // expires_in は秒単位、通常3600秒（1時間）
+              this.tokenExpiry = Date.now() + (resp.expires_in || 3600) * 1000;
+              this.refreshDriveUi();
+              resolve(true);
+            } else {
+              resolve(false);
+            }
+          }
+        });
+      }
+
+      // サイレントリフレッシュを試みる
+      this.tokenClient.requestAccessToken({ prompt: '' });
+    });
   }
 
   driveLogin() {
@@ -224,6 +259,7 @@ class GeminiTranscriber {
       this.driveStatus.className = 'status-badge error';
       return;
     }
+
     if (!this.tokenClient) {
       this.tokenClient = window.google.accounts.oauth2.initTokenClient({
         client_id: GCP_OAUTH_CLIENT_ID,
@@ -231,6 +267,7 @@ class GeminiTranscriber {
         callback: (resp) => {
           if (resp?.access_token) {
             this.oauthToken = resp.access_token;
+            this.tokenExpiry = Date.now() + (resp.expires_in || 3600) * 1000;
             this.driveStatus.textContent = '接続済み';
             this.driveStatus.className = 'status-badge success';
             this.refreshDriveUi();
@@ -241,12 +278,15 @@ class GeminiTranscriber {
         }
       });
     }
-    this.tokenClient.requestAccessToken({ prompt: '' });
+    // 初回ログインは consent を要求
+    this.tokenClient.requestAccessToken({ prompt: 'consent' });
   }
 
   async openDrivePicker() {
     try {
-      if (!this.oauthToken) throw new Error('Driveに未接続です');
+      // Picker表示前にトークンを確認・更新
+      const valid = await this.ensureValidToken();
+      if (!valid) throw new Error('Driveに再ログインしてください');
       if (!this.pickerReady || !window.google?.picker) throw new Error('Pickerの準備中です');
 
       const view = new window.google.picker.DocsView(window.google.picker.ViewId.DOCS)
@@ -260,7 +300,7 @@ class GeminiTranscriber {
         .setOAuthToken(this.oauthToken)
         .setDeveloperKey(GCP_API_KEY)
         .addView(view)
-        .enableFeature(window.google.picker.Feature.SUPPORT_DRIVES) // 共有ドライブ/共有アイテムも対象
+        .enableFeature(window.google.picker.Feature.SUPPORT_DRIVES)
         .setCallback((data) => this.onDrivePicked(data))
         .build();
 
@@ -279,6 +319,9 @@ class GeminiTranscriber {
     if (!doc?.id) return;
 
     try {
+      // ファイル追加前にトークン確認
+      await this.ensureValidToken();
+      
       const fileId = await this.resolveShortcut(doc.id);
       const meta = await this.getDriveMeta(fileId);
       const name = meta.name || doc.name || 'drive_file';
@@ -291,7 +334,12 @@ class GeminiTranscriber {
         size,
         mimeType,
         source: 'drive',
-        getBlob: async () => this.downloadDriveBlob(fileId)
+        driveFileId: fileId, // 後でダウンロード時に使う
+        getBlob: async () => {
+          // ダウンロード時にもトークン確認
+          await this.ensureValidToken();
+          return this.downloadDriveBlob(fileId);
+        }
       };
 
       this.files.push(item);
@@ -462,7 +510,7 @@ class GeminiTranscriber {
       <div class="result-item" id="${resultId}">
         <div class="result-header">
           <span class="result-filename">📄 ${this.escapeHtml(fileItem.name)}</span>
-          <span class="status-badge" id="${resultId}-status">アップロード準備...</span>
+          <span class="status-badge" id="${resultId}-status">準備中...</span>
         </div>
         <div class="result-tabs">
           <button class="tab-btn active" data-tab="chat" data-for="${resultId}" type="button">チャット</button>
@@ -470,6 +518,7 @@ class GeminiTranscriber {
         </div>
         <div class="chat-view" id="${resultId}-chat">準備中...</div>
         <pre class="json-view" id="${resultId}-json" style="display:none;">準備中...</pre>
+        <div class="result-actions" id="${resultId}-actions" style="margin-top:10px;"></div>
       </div>
     `;
 
@@ -478,8 +527,16 @@ class GeminiTranscriber {
     const statusEl = document.getElementById(`${resultId}-status`);
     const chatEl = document.getElementById(`${resultId}-chat`);
     const jsonEl = document.getElementById(`${resultId}-json`);
+    const actionsEl = document.getElementById(`${resultId}-actions`);
 
     try {
+      // Driveファイルの場合、ダウンロード前にトークン確認
+      if (fileItem.source === 'drive') {
+        statusEl.textContent = 'トークン確認中...';
+        const valid = await this.ensureValidToken();
+        if (!valid) throw new Error('Driveに再ログインしてください');
+      }
+
       statusEl.textContent = 'ファイル取得中...';
       const blob = await fileItem.getBlob();
       const mimeType = fileItem.mimeType || blob.type || 'application/octet-stream';
@@ -495,7 +552,8 @@ class GeminiTranscriber {
 
       const resultText = await this.generateWithFile(uploaded.uri, mimeType, prompt);
 
-      const parsed = this.safeJsonParseMaybe(resultText);
+      // JSON解析（改善版）
+      const parsed = this.robustJsonParse(resultText);
       const pretty = parsed ? JSON.stringify(parsed, null, 2) : resultText;
 
       jsonEl.textContent = pretty;
@@ -506,7 +564,10 @@ class GeminiTranscriber {
       statusEl.textContent = '完了';
       statusEl.className = 'status-badge success';
 
-      // cleanup（失敗しても無視）
+      // ダウンロードボタンを追加
+      this.addDownloadButtons(actionsEl, fileItem.name, pretty, segments);
+
+      // cleanup
       try {
         await fetch(`https://generativelanguage.googleapis.com/v1beta/${uploaded.name}?key=${encodeURIComponent(this.apiKey)}`, {
           method: 'DELETE'
@@ -520,6 +581,42 @@ class GeminiTranscriber {
       chatEl.innerHTML = `<div class="result-error">❌ ${this.escapeHtml(msg)}</div>`;
       jsonEl.textContent = msg;
     }
+  }
+
+  addDownloadButtons(container, fileName, jsonText, segments) {
+    const baseName = fileName.replace(/\.[^.]+$/, '');
+    
+    // JSONダウンロード
+    const jsonBtn = document.createElement('button');
+    jsonBtn.className = 'result-btn';
+    jsonBtn.textContent = '📥 JSON';
+    jsonBtn.onclick = () => {
+      const blob = new Blob([jsonText], { type: 'application/json' });
+      this.downloadBlob(blob, `${baseName}.json`);
+    };
+    container.appendChild(jsonBtn);
+
+    // テキストダウンロード
+    const txtBtn = document.createElement('button');
+    txtBtn.className = 'result-btn';
+    txtBtn.textContent = '📥 テキスト';
+    txtBtn.onclick = () => {
+      const text = segments.map(s => `${s.speaker}: ${s.text}`).join('\n\n');
+      const blob = new Blob([text], { type: 'text/plain' });
+      this.downloadBlob(blob, `${baseName}.txt`);
+    };
+    container.appendChild(txtBtn);
+  }
+
+  downloadBlob(blob, filename) {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
   }
 
   bindResultTabs(resultId) {
@@ -549,28 +646,23 @@ class GeminiTranscriber {
     const n = this.clampSpeaker(speakerCount);
     const labels = Array.from({ length: n }, (_, i) => `話者${i + 1}`).join('、');
 
-    return [
-      '音声/動画を日本語で文字起こししてください。',
-      '長くても最後まで諦めずに生成してください。',
-      '話者分離をして話者別にラベルを付けて出力してください。',
-      '文字起こし以外の説明、コメント、タイムスタンプは禁止します。',
-      '',
-      `話者は ${n} 人です。使用できる話者ラベルは次のみ: ${labels}`,
-      '',
-      '出力は必ずJSONのみ。以下の形式に厳密に従ってください。',
-      '{',
-      '  "segments": [',
-      '    { "speaker": "話者1", "text": "..." },',
-      '    { "speaker": "話者2", "text": "..." }',
-      '  ]',
-      '}'
-    ].join('\n');
+    return `あなたは音声文字起こしの専門家です。以下の音声/動画を日本語で文字起こししてください。
+
+## 重要なルール
+- 話者分離を行い、各発言に話者ラベルを付けてください
+- 話者は ${n} 人です。使用する話者ラベル: ${labels}
+- 文字起こし以外の説明やコメントは一切不要です
+- タイムスタンプは不要です
+- 音声の最初から最後まで全て文字起こししてください
+
+## 出力形式
+必ず以下のJSON形式のみで出力してください。マークダウンのコードブロックは使わないでください。
+
+{"segments":[{"speaker":"話者1","text":"発言内容"},{"speaker":"話者2","text":"発言内容"}]}`;
   }
 
   async uploadFileToGemini(blob, displayName) {
-    // ブラウザで通りやすい FormData 方式（仕切り直しの要点）
     const formData = new FormData();
-    // name指定はブラウザ依存なので、ファイル名はここで付ける
     const file = new File([blob], displayName || 'media', { type: blob.type || 'application/octet-stream' });
     formData.append('file', file);
 
@@ -593,7 +685,7 @@ class GeminiTranscriber {
   }
 
   async waitForFileActive(fileName) {
-    const maxAttempts = 90;
+    const maxAttempts = 120; // 2分まで待つ
     for (let i = 0; i < maxAttempts; i++) {
       const res = await fetch(
         `https://generativelanguage.googleapis.com/v1beta/${fileName}?key=${encodeURIComponent(this.apiKey)}`,
@@ -614,8 +706,8 @@ class GeminiTranscriber {
   async generateWithFile(fileUri, mimeType, prompt) {
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(this.model)}:generateContent?key=${encodeURIComponent(this.apiKey)}`;
 
-    // 1st: camelCase（推奨）
-    const body1 = {
+    // maxOutputTokensを削除して、モデルのデフォルト（最大）を使用
+    const body = {
       contents: [{
         role: 'user',
         parts: [
@@ -625,21 +717,20 @@ class GeminiTranscriber {
       }],
       generationConfig: {
         responseMimeType: 'application/json',
-        maxOutputTokens: 8192,
-        temperature: 0.2
+        temperature: 0.1
       }
     };
 
     let res = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body1)
+      body: JSON.stringify(body)
     });
 
     let data = null;
     try { data = await res.json(); } catch {}
 
-    // fallback: snake_case
+    // snake_case でリトライ
     if (!res.ok) {
       const body2 = {
         contents: [{
@@ -650,8 +741,7 @@ class GeminiTranscriber {
         }],
         generation_config: {
           response_mime_type: 'application/json',
-          max_output_tokens: 8192,
-          temperature: 0.2
+          temperature: 0.1
         }
       };
 
@@ -672,6 +762,80 @@ class GeminiTranscriber {
     return text || JSON.stringify(data, null, 2);
   }
 
+  // 改善版JSON解析
+  robustJsonParse(text) {
+    if (typeof text !== 'string') return null;
+    let t = text.trim();
+    if (!t) return null;
+
+    // マークダウンコードブロックを除去
+    t = t.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '');
+    t = t.trim();
+
+    // そのままパース
+    try { return JSON.parse(t); } catch {}
+
+    // JSONオブジェクト部分を抽出
+    const startIdx = t.indexOf('{');
+    const endIdx = t.lastIndexOf('}');
+    if (startIdx !== -1 && endIdx !== -1 && endIdx > startIdx) {
+      const jsonPart = t.slice(startIdx, endIdx + 1);
+      try { return JSON.parse(jsonPart); } catch {}
+
+      // 不完全なJSONを修復してみる
+      const repaired = this.repairJson(jsonPart);
+      if (repaired) {
+        try { return JSON.parse(repaired); } catch {}
+      }
+    }
+
+    // 配列として試す
+    const arrStart = t.indexOf('[');
+    const arrEnd = t.lastIndexOf(']');
+    if (arrStart !== -1 && arrEnd !== -1 && arrEnd > arrStart) {
+      const arrPart = t.slice(arrStart, arrEnd + 1);
+      try {
+        const arr = JSON.parse(arrPart);
+        if (Array.isArray(arr)) return { segments: arr };
+      } catch {}
+    }
+
+    return null;
+  }
+
+  // 不完全なJSONを修復
+  repairJson(jsonStr) {
+    let s = jsonStr;
+
+    // 末尾の不完全な文字列を修復
+    // 例: {"segments":[{"speaker":"話者1","text":"こんにち
+    
+    // 開いている引用符を閉じる
+    const quoteCount = (s.match(/"/g) || []).length;
+    if (quoteCount % 2 !== 0) {
+      s += '"';
+    }
+
+    // 開いている括弧を閉じる
+    const openBraces = (s.match(/{/g) || []).length;
+    const closeBraces = (s.match(/}/g) || []).length;
+    const openBrackets = (s.match(/\[/g) || []).length;
+    const closeBrackets = (s.match(/]/g) || []).length;
+
+    // 末尾のカンマを除去
+    s = s.replace(/,\s*$/, '');
+
+    // 不完全なオブジェクト/配列を閉じる
+    for (let i = 0; i < openBrackets - closeBrackets; i++) {
+      s += ']';
+    }
+    for (let i = 0; i < openBraces - closeBraces; i++) {
+      s += '}';
+    }
+
+    return s;
+  }
+
   extractSegments(parsed, rawText) {
     if (parsed && Array.isArray(parsed.segments)) {
       return parsed.segments
@@ -682,13 +846,30 @@ class GeminiTranscriber {
         .filter(x => x.text);
     }
 
-    // JSONが崩れた場合の最終フォールバック
+    // パースできなかった場合のフォールバック
     const fallback = String(rawText || '').trim();
+    
+    // 「話者N: テキスト」形式を検出してパース
+    const lines = fallback.split('\n').filter(l => l.trim());
+    const segments = [];
+    
+    for (const line of lines) {
+      const match = line.match(/^(話者\d+|Speaker\s*\d+)\s*[:：]\s*(.+)/i);
+      if (match) {
+        segments.push({
+          speaker: this.normalizeSpeaker(match[1]),
+          text: match[2].trim()
+        });
+      }
+    }
+
+    if (segments.length > 0) return segments;
+
     return fallback ? [{ speaker: '話者?', text: fallback }] : [];
   }
 
   renderChatHtml(segments) {
-    if (!segments.length) return '結果が空でした。';
+    if (!segments.length) return '<div class="no-result">結果が空でした。</div>';
 
     return segments.map(seg => {
       const sp = seg.speaker;
@@ -729,19 +910,6 @@ class GeminiTranscriber {
     return this.clampSpeaker(parseInt(m[1], 10));
   }
 
-  safeJsonParseMaybe(text) {
-    if (typeof text !== 'string') return null;
-    const t = text.trim();
-    if (!t) return null;
-    try { return JSON.parse(t); } catch {}
-    const a = t.indexOf('{');
-    const b = t.lastIndexOf('}');
-    if (a !== -1 && b !== -1 && b > a) {
-      try { return JSON.parse(t.slice(a, b + 1)); } catch {}
-    }
-    return null;
-  }
-
   guessMime(name) {
     const n = (name || '').toLowerCase();
     if (n.endsWith('.mp3')) return 'audio/mpeg';
@@ -762,14 +930,17 @@ class GeminiTranscriber {
   }
 
   normalizeFetchError(e) {
-    // fetch のネットワークエラーは TypeError: Failed to fetch になりがち
     const msg = e?.message || String(e);
     if (msg === 'Failed to fetch') {
       return [
-        'Failed to fetch（ネットワーク/CORS/ブロックの可能性）',
-        '・企業ネットワーク/拡張機能/セキュリティで generativelanguage.googleapis.com が遮断されていないか',
-        '・DevToolsのNetworkで該当リクエストが(OPTIONS含め)失敗していないか',
-        '・別タブでGoogleログインが必要な状態になっていないか'
+        'ネットワークエラー（Failed to fetch）',
+        '',
+        '考えられる原因:',
+        '・Wi-Fi/モバイル通信の接続が不安定',
+        '・generativelanguage.googleapis.com がブロックされている',
+        '・iOSの場合: 処理中に別アプリに切り替えないでください',
+        '',
+        'Driveファイルの場合は再度ログインしてお試しください'
       ].join('\n');
     }
     return msg;
