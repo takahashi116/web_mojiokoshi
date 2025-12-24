@@ -1,37 +1,23 @@
-/* app.js - Gemini transcription with speaker-separated chat UI + Google Drive Picker.
-   Key points:
-   - iPhone/iPad (iOS/iPadOS) ALWAYS uses Gemini Files API (no inline/base64), for stability.
-   - Speaker bubbles are color-coded (max 10) and labels are rendered as 「話者1」…「話者10」.
-*/
-
+/* app.js（フォルダ固定機能を削除 + iPhoneの巻き戻り対策としてトークンをsessionStorage復元） */
 (() => {
   'use strict';
 
-  // ====== Your Google Cloud OAuth Client ID & API key (for Drive Picker) ======
   const GCP_OAUTH_CLIENT_ID = '478200222114-ronuhiecjrc0lp9t1b6nnqod7cji46o3.apps.googleusercontent.com';
   const GCP_API_KEY = 'AIzaSyB6YPsmEy62ltuh1aqZX6Z5Hjx0P9mt0Lw';
-
-  // Drive scopes required for reading chosen file
   const DRIVE_SCOPES = 'https://www.googleapis.com/auth/drive.readonly';
 
-  // Gemini Developer API base
   const GEMINI_BASE_URL = 'https://generativelanguage.googleapis.com';
-
-  // Inline size thresholds (non-iOS only). Total request limit is 20MB; keep margin.
   const INLINE_MAX_BYTES = 15 * 1024 * 1024;
 
-  // LocalStorage keys
   const LS_GEMINI_KEY = 'gemini_api_key';
   const LS_SPEAKER_COUNT = 'speaker_count';
   const LS_MODEL = 'gemini_model';
-  const LS_PINNED_FOLDER = 'drive_pinned_folder';
 
-  function $(id) {
-    return document.getElementById(id);
-  }
+  const SS_DRIVE_TOKEN = 'drive_oauth_token';
+
+  function $(id) { return document.getElementById(id); }
 
   function isIOSLike() {
-    // iPadOS 13+ may report MacIntel
     const ua = navigator.userAgent || '';
     const iOS = /iP(hone|od|ad)/.test(ua);
     const iPadOS = navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1;
@@ -45,14 +31,10 @@
   }
 
   function bytesToHuman(bytes) {
-    if (!Number.isFinite(bytes)) return '';
+    if (!Number.isFinite(bytes) || bytes <= 0) return '—';
     const units = ['B', 'KB', 'MB', 'GB'];
-    let v = bytes;
-    let u = 0;
-    while (v >= 1024 && u < units.length - 1) {
-      v /= 1024;
-      u += 1;
-    }
+    let v = bytes, u = 0;
+    while (v >= 1024 && u < units.length - 1) { v /= 1024; u += 1; }
     return `${v.toFixed(v >= 10 || u === 0 ? 0 : 1)} ${units[u]}`;
   }
 
@@ -60,38 +42,21 @@
     if (typeof text !== 'string') return null;
     const trimmed = text.trim();
     if (!trimmed) return null;
+    try { return JSON.parse(trimmed); } catch {}
 
-    // Direct
-    try {
-      return JSON.parse(trimmed);
-    } catch {}
-
-    // Extract first JSON object/array region
     const firstObj = trimmed.indexOf('{');
     const lastObj = trimmed.lastIndexOf('}');
-    const firstArr = trimmed.indexOf('[');
-    const lastArr = trimmed.lastIndexOf(']');
-
-    const cand = [];
-    if (firstObj !== -1 && lastObj !== -1 && lastObj > firstObj) cand.push(trimmed.slice(firstObj, lastObj + 1));
-    if (firstArr !== -1 && lastArr !== -1 && lastArr > firstArr) cand.push(trimmed.slice(firstArr, lastArr + 1));
-
-    for (const c of cand) {
-      try {
-        return JSON.parse(c);
-      } catch {}
+    if (firstObj !== -1 && lastObj !== -1 && lastObj > firstObj) {
+      try { return JSON.parse(trimmed.slice(firstObj, lastObj + 1)); } catch {}
     }
     return null;
   }
 
   function toCamelGenerateRequest(body) {
-    // Convert the subset we use from snake_case to lowerCamelCase for compatibility.
     const out = JSON.parse(JSON.stringify(body || {}));
-
     if (out.generation_config) {
       out.generationConfig = out.generation_config;
       delete out.generation_config;
-
       if (out.generationConfig.response_mime_type) {
         out.generationConfig.responseMimeType = out.generationConfig.response_mime_type;
         delete out.generationConfig.response_mime_type;
@@ -128,7 +93,6 @@
         }
       }
     }
-
     return out;
   }
 
@@ -144,30 +108,20 @@
   function normalizeSpeakerLabel(raw) {
     if (!raw) return '話者?';
     const s = String(raw).trim();
-
-    // S1 / s1 / speaker1 -> 話者1
     const m = s.match(/(\d{1,2})/);
-    if (m) {
-      const n = clampSpeakerCount(parseInt(m[1], 10));
-      return `話者${n}`;
-    }
-
-    // already Japanese
+    if (m) return `話者${clampSpeakerCount(parseInt(m[1], 10))}`;
     if (s.startsWith('話者')) return s;
-
     return s;
   }
 
   function speakerIndexFromLabel(label) {
     const m = String(label || '').match(/(\d{1,2})/);
     if (!m) return 0;
-    const n = clampSpeakerCount(parseInt(m[1], 10));
-    return n;
+    return clampSpeakerCount(parseInt(m[1], 10));
   }
 
   class TranscriberApp {
     constructor() {
-      // DOM
       this.apiKeyInput = $('apiKeyInput');
       this.saveKeyBtn = $('saveKeyBtn');
       this.toggleKeyBtn = $('toggleKeyBtn');
@@ -183,15 +137,11 @@
 
       this.driveConnectBtn = $('driveConnectBtn');
       this.driveStatus = $('driveStatus');
-      this.pickFolderBtn = $('pickFolderBtn');
-      this.clearFolderBtn = $('clearFolderBtn');
-      this.pinnedFolderLabel = $('pinnedFolderLabel');
       this.pickFileBtn = $('pickFileBtn');
+      this.selectedFileName = $('selectedFileName');
 
       this.localFileInput = $('localFileInput');
       this.localFileName = $('localFileName');
-
-      this.selectedFileName = $('selectedFileName');
 
       this.startBtn = $('startBtn');
       this.progressBar = $('progressBar');
@@ -202,7 +152,6 @@
       this.jsonOutput = $('jsonOutput');
       this.downloadJsonBtn = $('downloadJsonBtn');
 
-      // State
       this.geminiApiKey = '';
       this.geminiModel = 'gemini-3-flash-preview';
       this.speakerCount = 2;
@@ -210,11 +159,7 @@
       this.oauthToken = '';
       this.tokenClient = null;
 
-      this.pinnedFolder = null; // {id,name}
-
-      // selectedFile can be either local or drive
       this.selectedFile = null; // { name, mimeType, size, getBlob():Promise<Blob> }
-
       this.latestJsonText = '';
 
       this.init();
@@ -225,9 +170,14 @@
       this.loadSettings();
       this.bindEvents();
       this.renderPromptPreview();
-
-      // Drive init is lazy (when user clicks login), but we prepare picker loading
       this.prepareGapiPickerLoad();
+
+      // iPhoneでページが戻った（実質リロード）場合でも、ログイン状態だけ復元
+      const savedToken = sessionStorage.getItem(SS_DRIVE_TOKEN);
+      if (savedToken) {
+        this.oauthToken = savedToken;
+        this.driveStatus.textContent = '接続済み（復元）';
+      }
 
       this.updateUiState();
     }
@@ -256,21 +206,8 @@
       const savedModel = localStorage.getItem(LS_MODEL);
       if (savedModel) this.geminiModel = savedModel;
 
-      const pinnedRaw = localStorage.getItem(LS_PINNED_FOLDER);
-      if (pinnedRaw) {
-        try {
-          this.pinnedFolder = JSON.parse(pinnedRaw);
-        } catch {
-          this.pinnedFolder = null;
-        }
-      }
-
       this.speakerCountSelect.value = String(this.speakerCount);
       this.modelSelect.value = this.geminiModel;
-
-      if (this.pinnedFolder?.name) {
-        this.pinnedFolderLabel.textContent = `固定: ${this.pinnedFolder.name}`;
-      }
     }
 
     bindEvents() {
@@ -292,8 +229,6 @@
       this.tabLocal.addEventListener('click', () => this.setSource('local'));
 
       this.driveConnectBtn.addEventListener('click', () => this.onDriveConnect());
-      this.pickFolderBtn.addEventListener('click', () => this.onPickFolder());
-      this.clearFolderBtn.addEventListener('click', () => this.onClearPinnedFolder());
       this.pickFileBtn.addEventListener('click', () => this.onPickDriveFile());
 
       this.localFileInput.addEventListener('change', () => this.onLocalFileSelected());
@@ -308,8 +243,6 @@
       this.tabLocal.classList.toggle('is-active', !isDrive);
       this.drivePanel.classList.toggle('is-hidden', !isDrive);
       this.localPanel.classList.toggle('is-hidden', isDrive);
-
-      // Don't discard the selected file automatically; just show state.
       this.updateUiState();
     }
 
@@ -337,34 +270,17 @@
     updateUiState() {
       const hasKey = !!(this.geminiApiKey || (this.apiKeyInput.value || '').trim());
       const hasFile = !!this.selectedFile;
-
-      // Drive buttons depend on oauthToken + picker readiness
       const driveReady = !!this.oauthToken && !!window.google?.picker;
 
       this.pickFileBtn.disabled = !driveReady;
-      this.pickFolderBtn.disabled = !driveReady;
-      this.clearFolderBtn.disabled = !driveReady;
-
       this.startBtn.disabled = !(hasKey && hasFile);
     }
 
-    // ===== Drive / Picker =====
-
     prepareGapiPickerLoad() {
-      // gapi.js is loaded async; when ready, we can set API key and load picker.
       const poll = async () => {
-        // Wait for gapi to exist
-        if (!window.gapi) {
-          setTimeout(poll, 150);
-          return;
-        }
-        try {
-          window.gapi.load('picker', { callback: () => {} });
-        } catch {
-          // retry
-          setTimeout(poll, 300);
-          return;
-        }
+        if (!window.gapi) { setTimeout(poll, 150); return; }
+        try { window.gapi.load('picker', { callback: () => {} }); }
+        catch { setTimeout(poll, 300); }
       };
       poll();
     }
@@ -381,6 +297,7 @@
           callback: (resp) => {
             if (resp?.access_token) {
               this.oauthToken = resp.access_token;
+              sessionStorage.setItem(SS_DRIVE_TOKEN, resp.access_token);
               this.driveStatus.textContent = '接続済み';
               this.updateUiState();
             } else {
@@ -389,64 +306,18 @@
           }
         });
       }
+      // iOSでも確実に返るよう、必要に応じて consent を出す運用が安全だが、
+      // まずは prompt:'' で試し、失敗時はユーザーが再クリックすれば consent が出るようにしている。
       this.tokenClient.requestAccessToken({ prompt: '' });
     }
 
     async ensurePickerReady() {
-      // Wait for google.picker and gapi
       const start = Date.now();
       while (!window.google?.picker) {
         if (Date.now() - start > 8000) throw new Error('Picker のロードに失敗しました');
         await new Promise(r => setTimeout(r, 120));
       }
       return true;
-    }
-
-    async onPickFolder() {
-      try {
-        await this.ensurePickerReady();
-        if (!this.oauthToken) throw new Error('Drive に未接続です');
-
-        const view = new window.google.picker.DocsView(window.google.picker.ViewId.FOLDERS)
-          .setIncludeFolders(true)
-          .setSelectFolderEnabled(true);
-
-        const picker = new window.google.picker.PickerBuilder()
-          .setAppId('478200222114')
-          .setOAuthToken(this.oauthToken)
-          .setDeveloperKey(GCP_API_KEY)
-          .addView(view)
-          .enableFeature(window.google.picker.Feature.SUPPORT_DRIVES)
-          .setCallback((data) => this.onFolderPicked(data))
-          .build();
-
-        picker.setVisible(true);
-      } catch (e) {
-        this.driveStatus.textContent = `フォルダ選択エラー: ${e?.message || e}`;
-      }
-    }
-
-    onFolderPicked(data) {
-      const Action = window.google.picker.Action;
-      if (data.action !== Action.PICKED) return;
-      const doc = data.docs?.[0];
-      if (!doc?.id) return;
-
-      this.pinnedFolder = { id: doc.id, name: doc.name || doc.id };
-      localStorage.setItem(LS_PINNED_FOLDER, JSON.stringify(this.pinnedFolder));
-      this.pinnedFolderLabel.textContent = `固定: ${this.pinnedFolder.name}`;
-
-      // iOS/Safari: avoid accidental navigation by forcing focus back
-      this.pinnedFolderLabel.scrollIntoView({ block: 'nearest' });
-
-      this.updateUiState();
-    }
-
-    onClearPinnedFolder() {
-      this.pinnedFolder = null;
-      localStorage.removeItem(LS_PINNED_FOLDER);
-      this.pinnedFolderLabel.textContent = '固定なし';
-      this.updateUiState();
     }
 
     async onPickDriveFile() {
@@ -457,23 +328,16 @@
         const view = new window.google.picker.DocsView(window.google.picker.ViewId.DOCS)
           .setIncludeFolders(false)
           .setMimeTypes([
-            // audio
             'audio/mpeg','audio/mp3','audio/mp4','audio/wav','audio/x-wav','audio/aac','audio/ogg','audio/webm','audio/flac',
-            // video
             'video/mp4','video/quicktime','video/webm','video/x-matroska'
           ].join(','));
-
-        // Folder pin: if setParent is used, do NOT use DocsView.setEnableDrives(true) (it would override parent).
-        if (this.pinnedFolder?.id) {
-          view.setParent(this.pinnedFolder.id);
-        }
 
         const picker = new window.google.picker.PickerBuilder()
           .setAppId('478200222114')
           .setOAuthToken(this.oauthToken)
           .setDeveloperKey(GCP_API_KEY)
           .addView(view)
-          .enableFeature(window.google.picker.Feature.SUPPORT_DRIVES)
+          .enableFeature(window.google.picker.Feature.SUPPORT_DRIVES) // 共有も対象
           .setCallback((data) => this.onDriveFilePicked(data))
           .build();
 
@@ -490,26 +354,18 @@
       const doc = data.docs?.[0];
       if (!doc?.id) return;
 
-      const picked = {
-        id: doc.id,
-        name: doc.name || 'drive_file',
-        mimeType: doc.mimeType || '',
-        sizeBytes: Number(doc.sizeBytes || doc.size || 0)
-      };
+      const resolvedId = await this.resolveDriveShortcutIfNeeded(doc.id);
+      const meta = await this.getDriveFileMeta(resolvedId);
 
-      // Resolve shortcuts (if any)
-      const resolved = await this.resolveDriveShortcutIfNeeded(picked.id);
-      const meta = await this.getDriveFileMeta(resolved);
-
-      const finalName = meta.name || picked.name;
-      const finalMime = meta.mimeType || picked.mimeType || 'application/octet-stream';
-      const finalSize = Number(meta.size || picked.sizeBytes || 0);
+      const finalName = meta.name || doc.name || 'drive_file';
+      const finalMime = meta.mimeType || doc.mimeType || 'application/octet-stream';
+      const finalSize = Number(meta.size || doc.sizeBytes || doc.size || 0);
 
       this.selectedFile = {
         name: finalName,
         mimeType: finalMime,
         size: finalSize,
-        getBlob: async () => this.downloadDriveFileBlob(resolved)
+        getBlob: async () => this.downloadDriveFileBlob(resolvedId)
       };
 
       this.selectedFileName.textContent = `${finalName} (${bytesToHuman(finalSize)})`;
@@ -521,15 +377,12 @@
     }
 
     async resolveDriveShortcutIfNeeded(fileId) {
-      // If fileId points to a shortcut, resolve to the target.
       try {
         const meta = await this.getDriveFileMeta(fileId, 'mimeType,shortcutDetails');
         if (meta?.mimeType === 'application/vnd.google-apps.shortcut' && meta.shortcutDetails?.targetId) {
           return meta.shortcutDetails.targetId;
         }
-      } catch {
-        // ignore
-      }
+      } catch {}
       return fileId;
     }
 
@@ -557,8 +410,6 @@
       return res.blob();
     }
 
-    // ===== Local file =====
-
     onLocalFileSelected() {
       const f = this.localFileInput.files?.[0];
       if (!f) {
@@ -570,35 +421,25 @@
       this.localFileName.textContent = `${f.name} (${bytesToHuman(f.size)})`;
       this.selectedFileName.textContent = `${f.name} (${bytesToHuman(f.size)})`;
 
-      this.selectedFile = {
-        name: f.name,
-        mimeType: f.type || 'application/octet-stream',
-        size: f.size,
-        getBlob: async () => f
-      };
-
+      this.selectedFile = { name: f.name, mimeType: f.type || 'application/octet-stream', size: f.size, getBlob: async () => f };
       this.updateUiState();
       this.renderPromptPreview();
     }
-
-    // ===== Prompt / Transcription =====
 
     buildPrompt() {
       const n = clampSpeakerCount(this.speakerCount);
       const speakerList = Array.from({ length: n }, (_, i) => `話者${i + 1}`).join('、');
 
-      // JSON schema (simple) for predictable parsing
       const schema = {
         type: 'object',
         properties: {
           segments: {
             type: 'array',
-            description: '発話の順番を保持した配列（時刻は不要）。',
             items: {
               type: 'object',
               properties: {
-                speaker: { type: 'string', description: `話者ラベル。必ず ${speakerList} のいずれか。` },
-                text: { type: 'string', description: '発話内容（日本語）' }
+                speaker: { type: 'string', description: `必ず ${speakerList} のいずれか` },
+                text: { type: 'string' }
               },
               required: ['speaker', 'text'],
               additionalProperties: false
@@ -615,13 +456,13 @@
         '話者分離を行い、話者別にラベルを付けてください。',
         '文字起こし以外の説明、コメント、タイムスタンプは禁止します。',
         '',
-        `話者は ${n} 人です。使用できる話者ラベルは次の通りです: ${speakerList}`,
+        `話者は ${n} 人です。使用できる話者ラベル: ${speakerList}`,
         '',
         '出力は必ず JSON のみ。次の JSON Schema に厳密に従ってください:',
         JSON.stringify(schema, null, 2)
       ].join('\n');
 
-      return { prompt, schema };
+      return { prompt };
     }
 
     renderPromptPreview() {
@@ -652,9 +493,8 @@
         const mimeType = this.selectedFile.mimeType || blob.type || 'application/octet-stream';
         const displayName = this.selectedFile.name || 'media';
 
-        // Important: iOS always uses Files API (no inline/base64)
-        const forceFilesApi = isIOSLike();
-        const useFilesApi = forceFilesApi || blob.size > INLINE_MAX_BYTES;
+        // iPhone/iPad は常に Files API（inline/base64を使わない）
+        const useFilesApi = isIOSLike() || blob.size > INLINE_MAX_BYTES;
 
         this.setProgress(15, useFilesApi ? 'Files API へアップロード中...' : 'インライン送信準備中...');
 
@@ -689,18 +529,11 @@
     prettyJsonOrRaw(text) {
       const obj = safeJsonParseMaybe(text);
       if (!obj) return String(text || '');
-      try {
-        return JSON.stringify(obj, null, 2);
-      } catch {
-        return String(text || '');
-      }
+      try { return JSON.stringify(obj, null, 2); } catch { return String(text || ''); }
     }
 
     extractMessages(parsed, rawText) {
-      // Output preference:
-      // { "segments": [ { "speaker":"話者1", "text":"..." }, ... ] }
       const messages = [];
-
       if (parsed && Array.isArray(parsed.segments)) {
         for (const seg of parsed.segments) {
           const speaker = normalizeSpeakerLabel(seg?.speaker);
@@ -710,12 +543,8 @@
         }
         return messages;
       }
-
-      // Fallback: if model returned something else, keep as one message
       const fallback = String(rawText || '').trim();
-      if (fallback) {
-        messages.push({ speaker: '話者?', text: fallback });
-      }
+      if (fallback) messages.push({ speaker: '話者?', text: fallback });
       return messages;
     }
 
@@ -725,16 +554,16 @@
         return;
       }
       this.chatThread.innerHTML = '';
-
       for (const m of messages) {
         const label = normalizeSpeakerLabel(m.speaker);
         const idx = speakerIndexFromLabel(label);
+
         const row = document.createElement('div');
         row.className = `msg-row ${idx ? `speaker-${idx}` : ''}`.trim();
 
         const avatar = document.createElement('div');
         avatar.className = 'avatar';
-        avatar.textContent = label; // 「S1」ではなく「話者1」
+        avatar.textContent = label; // S1ではなく「話者1」
 
         const bubble = document.createElement('div');
         bubble.className = 'bubble';
@@ -756,29 +585,17 @@
       }
     }
 
-    // ===== Gemini API calls =====
-
     async generateWithInline(base64Data, mimeType) {
       if (!base64Data) throw new Error('inline データが空です');
       const { prompt } = this.buildPrompt();
 
-      // REST API expects snake_case fields for generativelanguage v1beta
       const body = {
-        contents: [
-          {
-            role: 'user',
-            parts: [
-              { text: prompt },
-              { inline_data: { mime_type: mimeType, data: base64Data } }
-            ]
-          }
-        ],
-        generation_config: {
-          response_mime_type: 'application/json',
-          max_output_tokens: 8192
-        }
+        contents: [{
+          role: 'user',
+          parts: [{ text: prompt }, { inline_data: { mime_type: mimeType, data: base64Data } }]
+        }],
+        generation_config: { response_mime_type: 'application/json', max_output_tokens: 8192 }
       };
-
       return this.callGenerateContent(body);
     }
 
@@ -787,39 +604,23 @@
       const { prompt } = this.buildPrompt();
 
       const body = {
-        contents: [
-          {
-            role: 'user',
-            parts: [
-              { text: prompt },
-              { file_data: { mime_type: mimeType, file_uri: fileUri } }
-            ]
-          }
-        ],
-        generation_config: {
-          response_mime_type: 'application/json',
-          max_output_tokens: 8192
-        }
+        contents: [{
+          role: 'user',
+          parts: [{ text: prompt }, { file_data: { mime_type: mimeType, file_uri: fileUri } }]
+        }],
+        generation_config: { response_mime_type: 'application/json', max_output_tokens: 8192 }
       };
-
       return this.callGenerateContent(body);
     }
 
     async callGenerateContent(body) {
       const url = `${GEMINI_BASE_URL}/v1beta/models/${encodeURIComponent(this.geminiModel)}:generateContent?key=${encodeURIComponent(this.geminiApiKey)}`;
 
-      // 1st try: snake_case (as documented in Gemini API reference)
-      let res = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body)
-      });
-
+      let res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
       let json = await res.json().catch(() => null);
+
       if (!res.ok) {
         const msg = json?.error?.message || '';
-
-        // 2nd try: lowerCamelCase (in case the backend expects protobuf JSON mapping)
         const shouldRetry =
           msg.includes('Unknown name') ||
           msg.includes('Invalid JSON payload') ||
@@ -829,145 +630,11 @@
 
         if (shouldRetry) {
           const altBody = toCamelGenerateRequest(body);
-          res = await fetch(url, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(altBody)
-          });
+          res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(altBody) });
           json = await res.json().catch(() => null);
         }
       }
 
       if (!res.ok) {
         const msg = json?.error?.message || `HTTP ${res.status}`;
-        throw new Error(msg);
-      }
-
-      const text = json?.candidates?.[0]?.content?.parts?.map(p => p.text).filter(Boolean).join('') || '';
-      if (!text.trim()) {
-        // JSON mode sometimes returns structured JSON as text; if empty, return full response for debugging.
-        return JSON.stringify(json, null, 2);
-      }
-      return text;
-    }
-
-    // ===== Gemini Files API upload (resumable) =====
-
-    async uploadViaFilesApi(blob, mimeType, displayName) {
-      // Start resumable session
-      const startUrl = `${GEMINI_BASE_URL}/upload/v1beta/files?key=${encodeURIComponent(this.geminiApiKey)}`;
-
-      const snakeBody = { file: { display_name: displayName || 'media' } };
-      const camelBody = toCamelFileUploadBody(snakeBody);
-
-      const startTry = async (body) => fetch(startUrl, {
-        method: 'POST',
-        headers: {
-          'X-Goog-Upload-Protocol': 'resumable',
-          'X-Goog-Upload-Command': 'start',
-          'X-Goog-Upload-Header-Content-Length': String(blob.size),
-          'X-Goog-Upload-Header-Content-Type': mimeType,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify(body)
-      });
-
-      let startRes = await startTry(snakeBody);
-      if (!startRes.ok) {
-        // Retry with camelCase field names if backend expects protobuf JSON mapping
-        startRes = await startTry(camelBody);
-      }
-
-      if (!startRes.ok) {
-        const t = await startRes.text().catch(() => '');
-        throw new Error(`Files API start 失敗: ${startRes.status} ${t}`);
-      }
-
-      const uploadUrl = startRes.headers.get('x-goog-upload-url') || startRes.headers.get('X-Goog-Upload-URL');
-      if (!uploadUrl) throw new Error('Files API upload URL が取得できません');
-
-      // Upload bytes
-      const upRes = await fetch(uploadUrl, {
-        method: 'POST',
-        headers: {
-          'Content-Length': String(blob.size),
-          'X-Goog-Upload-Offset': '0',
-          'X-Goog-Upload-Command': 'upload, finalize'
-        },
-        body: blob
-      });
-
-      const fileInfo = await upRes.json().catch(() => null);
-      if (!upRes.ok) {
-        const msg = fileInfo?.error?.message || `Files API upload 失敗: ${upRes.status}`;
-        throw new Error(msg);
-      }
-
-      // Wait until ACTIVE (some files are PROCESSING)
-      const fileName = fileInfo?.file?.name;
-      if (fileName) {
-        await this.waitForFileActive(fileName);
-      }
-
-      return fileInfo;
-    }
-
-    async waitForFileActive(fileName) {
-      // Poll Files API until ACTIVE (some uploads are processed asynchronously).
-      const url = `${GEMINI_BASE_URL}/v1beta/${encodeURIComponent(fileName)}?key=${encodeURIComponent(this.geminiApiKey)}`;
-      const start = Date.now();
-      let delay = 600;
-
-      while (Date.now() - start < 45000) {
-        const res = await fetch(url, { method: 'GET' });
-        if (res.ok) {
-          const j = await res.json().catch(() => null);
-          const state = j?.file?.state || j?.state || '';
-          if (state === 'ACTIVE' || state === 'STATE_ACTIVE') return true;
-          if (state === 'FAILED' || state === 'STATE_FAILED') throw new Error('Files API: ファイル処理に失敗しました');
-        }
-        await new Promise(r => setTimeout(r, delay));
-        delay = Math.min(5000, Math.floor(delay * 1.35));
-      }
-      // Not fatal; proceed anyway
-      return false;
-    }
-
-    async blobToBase64(blob) {
-      // Convert Blob to base64 (without data: prefix)
-      return new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onerror = () => reject(new Error('base64 変換に失敗しました'));
-        reader.onload = () => {
-          const result = String(reader.result || '');
-          const comma = result.indexOf(',');
-          if (comma === -1) return reject(new Error('base64 形式が不正です'));
-          resolve(result.slice(comma + 1));
-        };
-        reader.readAsDataURL(blob);
-      });
-    }
-
-    // ===== Download =====
-
-    downloadLatestJson() {
-      const content = this.prettyJsonOrRaw(this.latestJsonText);
-      const blob = new Blob([content], { type: 'application/json;charset=utf-8' });
-      const url = URL.createObjectURL(blob);
-
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = 'transcript.json';
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-
-      setTimeout(() => URL.revokeObjectURL(url), 1500);
-    }
-  }
-
-  window.addEventListener('DOMContentLoaded', () => {
-    // expose for debugging
-    window.__transcriberApp = new TranscriberApp();
-  });
-})();
+        thro
