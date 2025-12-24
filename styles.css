@@ -1,26 +1,14 @@
-/* styles.css - UI + speaker coloring (max 10) */
+/* styles.css（修正：実体。デザイン＋話者1〜10色分け対応） */
 
 :root{
   --bg: #0b1220;
   --card: rgba(255,255,255,.06);
-  --card2: rgba(255,255,255,.08);
   --border: rgba(255,255,255,.14);
   --text: rgba(255,255,255,.92);
   --muted: rgba(255,255,255,.65);
   --muted2: rgba(255,255,255,.45);
   --shadow: 0 18px 45px rgba(0,0,0,.35);
   --radius: 18px;
-
-  --sp1: #3b82f6;
-  --sp2: #ef4444;
-  --sp3: #10b981;
-  --sp4: #f59e0b;
-  --sp5: #8b5cf6;
-  --sp6: #06b6d4;
-  --sp7: #ec4899;
-  --sp8: #84cc16;
-  --sp9: #f97316;
-  --sp10:#22c55e;
 }
 
 *{ box-sizing:border-box; }
@@ -310,20 +298,20 @@ input:focus, select:focus{
   margin: 10px 0;
 }
 .avatar{
-  width: 48px;
-  height: 48px;
-  border-radius: 16px;
+  width: 56px;
+  height: 56px;
+  border-radius: 18px;
   border: 1px solid rgba(255,255,255,.16);
   background: rgba(255,255,255,.06);
   display:flex;
   align-items:center;
   justify-content:center;
   text-align:center;
-  padding: 4px;
+  padding: 6px;
   font-weight: 900;
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.05;
-  flex: 0 0 48px;
+  flex: 0 0 56px;
 }
 .bubble{
   max-width: 78%;
@@ -345,7 +333,7 @@ input:focus, select:focus{
   word-break: break-word;
 }
 
-/* Speaker colors (max 10). Applies to both avatar and bubble. */
+/* Speaker colors (max 10). app.js が msg-row speaker-1..10 を付与 */
 .msg-row.speaker-1 .avatar, .msg-row.speaker-1 .bubble{ border-color: rgba(59,130,246,.55); }
 .msg-row.speaker-1 .avatar{ background: rgba(59,130,246,.22); }
 .msg-row.speaker-1 .bubble{ background: rgba(59,130,246,.12); }

@@ -1,0 +1,3 @@
+/* style.css（新規/修正：互換用ラッパー）
+   旧HTMLが style.css を参照していても、実体(styles.css)が効くようにする */
+@import url("./styles.css?v=20251224");
