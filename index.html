@@ -75,6 +75,15 @@
       <section class="upload-section glass-card">
         <h2>🎵 音声/動画ファイル選択</h2>
 
+        <div class="mode-switch-row">
+          <span class="mode-label">デバイスモード:</span>
+          <div class="mode-switch">
+            <button id="modePc" class="mode-btn active" type="button">💻 PC</button>
+            <button id="modeIphone" class="mode-btn" type="button">📱 iPhone</button>
+          </div>
+          <span class="mode-hint" id="modeHint">通常モード</span>
+        </div>
+
         <div class="drive-row">
           <button id="driveLoginBtn" class="btn-secondary" type="button">Google Drive にログイン</button>
           <button id="drivePickBtn" class="btn-secondary" type="button" disabled>Drive から選ぶ</button>
@@ -100,8 +109,8 @@
           <div class="hint-title">📱 iPhoneをお使いの方へ</div>
           <div class="hint-text">
             処理中は<strong>この画面を開いたまま</strong>にしてください。<br>
-            画面ロックや他アプリへの切り替えで処理が中断される場合があります。<br>
-            大きなファイル（50MB以上）はPCでの処理を推奨します。
+            Driveの大きなファイルは分割ダウンロードで対応しますが、<br>
+            それでも中断する場合はPCでの処理をお試しください。
           </div>
         </div>
       </section>

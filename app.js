@@ -57,11 +57,15 @@ class GeminiTranscriber {
     // Wake Lock（iOS/Safari対策）
     this.wakeLock = null;
 
+    // デバイスモード（'pc' or 'iphone'）
+    this.deviceMode = 'pc';
+
     this.init();
   }
 
   init() {
     this.initSpeakerSelect();
+    this.initDeviceMode();
     this.bindEvents();
     this.loadSavedSettings();
     this.initPickerLoader();
@@ -76,6 +80,74 @@ class GeminiTranscriber {
       opt.textContent = String(i);
       this.speakerCountSelect.appendChild(opt);
     }
+  }
+
+  initDeviceMode() {
+    const modePcBtn = document.getElementById('modePc');
+    const modeIphoneBtn = document.getElementById('modeIphone');
+    const modeHint = document.getElementById('modeHint');
+
+    if (!modePcBtn || !modeIphoneBtn) return;
+
+    // 保存された設定を読み込み、なければ自動判定
+    try {
+      const saved = localStorage.getItem('device_mode');
+      if (saved === 'pc' || saved === 'iphone') {
+        this.deviceMode = saved;
+      } else {
+        // 初回は自動判定
+        this.deviceMode = this.detectIOS() ? 'iphone' : 'pc';
+      }
+    } catch {
+      this.deviceMode = this.detectIOS() ? 'iphone' : 'pc';
+    }
+
+    this.updateDeviceModeUI();
+
+    modePcBtn.addEventListener('click', () => {
+      this.deviceMode = 'pc';
+      this.saveDeviceMode();
+      this.updateDeviceModeUI();
+    });
+
+    modeIphoneBtn.addEventListener('click', () => {
+      this.deviceMode = 'iphone';
+      this.saveDeviceMode();
+      this.updateDeviceModeUI();
+    });
+  }
+
+  updateDeviceModeUI() {
+    const modePcBtn = document.getElementById('modePc');
+    const modeIphoneBtn = document.getElementById('modeIphone');
+    const modeHint = document.getElementById('modeHint');
+
+    if (!modePcBtn || !modeIphoneBtn) return;
+
+    modePcBtn.classList.toggle('active', this.deviceMode === 'pc');
+    modeIphoneBtn.classList.toggle('active', this.deviceMode === 'iphone');
+
+    if (modeHint) {
+      if (this.deviceMode === 'iphone') {
+        modeHint.textContent = '分割DL有効・メモリ節約';
+        modeHint.style.color = '#10b981';
+      } else {
+        modeHint.textContent = '通常モード';
+        modeHint.style.color = '';
+      }
+    }
+  }
+
+  saveDeviceMode() {
+    try {
+      localStorage.setItem('device_mode', this.deviceMode);
+    } catch {}
+  }
+
+  // 実際のデバイス判定（初期値用）
+  detectIOS() {
+    return /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+      (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
   }
 
   bindEvents() {
@@ -331,17 +403,23 @@ class GeminiTranscriber {
       const mimeType = meta.mimeType || doc.mimeType || 'application/octet-stream';
       const size = Number(meta.size || 0);
 
+      // iOSで大きなDriveファイルの場合は警告（50MB以上のみ）
+      const sizeLimit = 50 * 1024 * 1024; // 50MB
+      if (this.isIOS() && size > sizeLimit) {
+        const proceed = await this.showDriveWarningForIOS(name, size, fileId);
+        if (!proceed) return;
+      }
+
       const item = {
         id: crypto.randomUUID(),
         name,
         size,
         mimeType,
         source: 'drive',
-        driveFileId: fileId, // 後でダウンロード時に使う
-        getBlob: async () => {
-          // ダウンロード時にもトークン確認
+        driveFileId: fileId,
+        getBlob: async (onProgress) => {
           await this.ensureValidToken();
-          return this.downloadDriveBlob(fileId);
+          return this.downloadDriveBlob(fileId, size, onProgress);
         }
       };
 
@@ -352,6 +430,92 @@ class GeminiTranscriber {
       this.driveStatus.textContent = `取得失敗: ${e?.message || e}`;
       this.driveStatus.className = 'status-badge error';
     }
+  }
+
+  // iOSでDrive大容量ファイル選択時の警告ダイアログ
+  async showDriveWarningForIOS(fileName, fileSize, fileId) {
+    return new Promise((resolve) => {
+      const overlay = document.createElement('div');
+      overlay.style.cssText = `
+        position: fixed;
+        top: 0; left: 0; right: 0; bottom: 0;
+        background: rgba(0,0,0,0.85);
+        z-index: 10000;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 20px;
+      `;
+
+      const modal = document.createElement('div');
+      modal.style.cssText = `
+        background: #1a1a2e;
+        border-radius: 16px;
+        padding: 24px;
+        max-width: 400px;
+        width: 100%;
+        border: 1px solid rgba(255,255,255,0.1);
+        box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+      `;
+
+      modal.innerHTML = `
+        <div style="text-align:center; margin-bottom:16px;">
+          <span style="font-size:48px;">📱</span>
+        </div>
+        <h3 style="color:#f59e0b; font-size:18px; margin-bottom:12px; text-align:center;">
+          大きなファイルです
+        </h3>
+        <p style="color:rgba(255,255,255,0.8); font-size:14px; line-height:1.6; margin-bottom:16px;">
+          <strong>${this.escapeHtml(fileName)}</strong><br>
+          (${this.formatFileSize(fileSize)})
+        </p>
+        <div style="background:rgba(16,185,129,0.15); border:1px solid rgba(16,185,129,0.3); border-radius:10px; padding:14px; margin-bottom:16px;">
+          <p style="color:#10b981; font-size:13px; font-weight:600; margin-bottom:8px;">
+            ✅ 分割ダウンロードで対応します
+          </p>
+          <p style="color:rgba(255,255,255,0.7); font-size:12px; line-height:1.5;">
+            メモリ負荷を軽減するため、8MBずつ分割してダウンロードします。
+          </p>
+        </div>
+        <p style="color:rgba(255,255,255,0.6); font-size:12px; line-height:1.5; margin-bottom:20px;">
+          ⚠️ それでも処理中にアプリが中断する場合は、PCでの処理をお試しください。
+        </p>
+        <div style="display:flex; flex-direction:column; gap:10px;">
+          <button id="driveModalProceed" style="
+            background: linear-gradient(135deg, #10b981, #059669);
+            color: white;
+            border: none;
+            padding: 14px;
+            border-radius: 10px;
+            font-size: 15px;
+            font-weight: 600;
+            cursor: pointer;
+          ">処理を開始</button>
+          <button id="driveModalCancel" style="
+            background: transparent;
+            color: rgba(255,255,255,0.5);
+            border: 1px solid rgba(255,255,255,0.2);
+            padding: 10px;
+            border-radius: 10px;
+            font-size: 13px;
+            cursor: pointer;
+          ">キャンセル</button>
+        </div>
+      `;
+
+      overlay.appendChild(modal);
+      document.body.appendChild(overlay);
+
+      modal.querySelector('#driveModalProceed').addEventListener('click', () => {
+        overlay.remove();
+        resolve(true);
+      });
+
+      modal.querySelector('#driveModalCancel').addEventListener('click', () => {
+        overlay.remove();
+        resolve(false);
+      });
+    });
   }
 
   async resolveShortcut(fileId) {
@@ -376,7 +540,13 @@ class GeminiTranscriber {
     return res.json();
   }
 
-  async downloadDriveBlob(fileId) {
+  async downloadDriveBlob(fileId, totalSize, onProgress) {
+    // iOSの場合はチャンク分割ダウンロード
+    if (this.isIOS() && totalSize && totalSize > 10 * 1024 * 1024) {
+      return this.downloadDriveBlobChunked(fileId, totalSize, onProgress);
+    }
+
+    // 通常のダウンロード
     const url = new URL(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}`);
     url.searchParams.set('alt', 'media');
     url.searchParams.set('supportsAllDrives', 'true');
@@ -386,6 +556,49 @@ class GeminiTranscriber {
     });
     if (!res.ok) throw new Error(`Drive download: HTTP ${res.status}`);
     return res.blob();
+  }
+
+  // チャンク分割ダウンロード（iOS向け）
+  async downloadDriveBlobChunked(fileId, totalSize, onProgress) {
+    const chunkSize = 8 * 1024 * 1024; // 8MB chunks
+    const chunks = [];
+    let downloaded = 0;
+
+    const url = new URL(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}`);
+    url.searchParams.set('alt', 'media');
+    url.searchParams.set('supportsAllDrives', 'true');
+
+    for (let offset = 0; offset < totalSize; offset += chunkSize) {
+      const end = Math.min(offset + chunkSize - 1, totalSize - 1);
+
+      // トークン確認（長時間ダウンロードで切れる可能性）
+      await this.ensureValidToken();
+
+      const res = await fetch(url.toString(), {
+        headers: {
+          Authorization: `Bearer ${this.oauthToken}`,
+          Range: `bytes=${offset}-${end}`
+        }
+      });
+
+      if (!res.ok && res.status !== 206) {
+        throw new Error(`Drive chunk download: HTTP ${res.status}`);
+      }
+
+      const chunkBlob = await res.blob();
+      chunks.push(chunkBlob);
+      downloaded += chunkBlob.size;
+
+      if (onProgress) {
+        onProgress(Math.round((downloaded / totalSize) * 100), downloaded, totalSize);
+      }
+
+      // GCを促すための小休止
+      await new Promise(r => setTimeout(r, 50));
+    }
+
+    // チャンクを結合
+    return new Blob(chunks);
   }
 
   // ===== Wake Lock（画面スリープ防止）=====
@@ -580,9 +793,9 @@ class GeminiTranscriber {
     }
   }
 
+  // デバイスモードに基づいてiPhoneモードかどうかを判定
   isIOS() {
-    return /iPad|iPhone|iPod/.test(navigator.userAgent) ||
-      (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+    return this.deviceMode === 'iphone';
   }
 
   showIOSWarning() {
@@ -662,7 +875,14 @@ class GeminiTranscriber {
       }
 
       statusEl.textContent = 'ファイル取得中...';
-      const blob = await fileItem.getBlob();
+      let blob;
+      if (fileItem.source === 'drive') {
+        blob = await fileItem.getBlob((percent, loaded, total) => {
+          statusEl.textContent = `Driveからダウンロード中... ${percent}% (${this.formatFileSize(loaded)}/${this.formatFileSize(total)})`;
+        });
+      } else {
+        blob = await fileItem.getBlob();
+      }
       const mimeType = fileItem.mimeType || blob.type || 'application/octet-stream';
 
       statusEl.textContent = 'アップロード中... 0%';
